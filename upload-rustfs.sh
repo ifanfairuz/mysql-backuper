@@ -4,7 +4,6 @@
 # Konfigurasi & Direktori Utama
 # ==============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/.env.rustfs"
 RESULT_DIR="$SCRIPT_DIR/result"
 HISTORY_PARENT="$SCRIPT_DIR/history"
 
@@ -33,25 +32,29 @@ check_dependencies() {
     fi
 }
 
-load_environment() {
-    if [ ! -f "$ENV_FILE" ]; then
-        log_message "[ERROR] File konfigurasi '$ENV_FILE' tidak ditemukan!"
-        log_message "Buat file .env.rustfs berisi variabel seperti RUSTFS_ENDPOINT, RUSTFS_ACCESS_KEY, RUSTFS_SECRET_KEY, dan RUSTFS_BUCKET."
+validate_bucket() {
+    local bucket_name="$1"
+
+    log_message "[INFO] Memeriksa koneksi bucket via 'rc ping $bucket_name'..."
+    rc ping "$bucket_name" >> "$UPLOAD_LOG_FILE" 2>&1
+    if [ $? -ne 0 ]; then
+        log_message "[ERROR] Gagal melakukan ping ke bucket '$bucket_name'."
         exit 1
     fi
 
-    # Muat variabel environment secara aman
-    set -a
-    source "$ENV_FILE"
-    set +a
-
-    if [ -z "$RUSTFS_BUCKET" ]; then
-        log_message "[ERROR] Variabel RUSTFS_BUCKET tidak didefinisikan di dalam $ENV_FILE."
+    log_message "[INFO] Memeriksa kesiapan bucket via 'rc ready $bucket_name'..."
+    rc ready "$bucket_name" >> "$UPLOAD_LOG_FILE" 2>&1
+    if [ $? -ne 0 ]; then
+        log_message "[ERROR] Bucket '$bucket_name' belum siap / tidak dapat diakses."
         exit 1
     fi
+
+    log_message "[SUCCESS] Bucket '$bucket_name' valid dan siap digunakan."
 }
 
 process_uploads() {
+    local bucket_name="$1"
+
     if [ ! -d "$RESULT_DIR" ]; then
         log_message "[INFO] Folder result '$RESULT_DIR' tidak ditemukan. Tidak ada file untuk di-upload."
         return
@@ -71,24 +74,27 @@ process_uploads() {
             local file_name
             file_name=$(basename "$file_path")
 
+            # Target tujuan di RustFS: bucket_name/tanggal/filename
+            local remote_target="$bucket_name/$CURRENT_DATE/$file_name"
+
             log_message "--------------------------------------------------"
             log_message "[INFO] Memproses file: $file_name"
 
-            # Eksekusi upload menggunakan client 'rc'
-            log_message "[INFO] Mengunggah $file_name ke RustFS..."
-            rc cp "$file_path" "rustfs://$RUSTFS_BUCKET/$file_name" >> "$UPLOAD_LOG_FILE" 2>&1
+            # Eksekusi upload menggunakan client 'rc object copy'
+            log_message "[INFO] Mengunggah ke RustFS -> $remote_target..."
+            rc object copy "$file_path" "$remote_target" >> "$UPLOAD_LOG_FILE" 2>&1
 
             if [ $? -eq 0 ]; then
                 log_message "[SUCCESS] Berhasil mengunggah $file_name ke RustFS."
 
-                # Pindahkan file ke folder history/tanggal
+                # Pindahkan file ke folder history/tanggal lokal
                 log_message "[INFO] Memindahkan $file_name ke $(basename "$HISTORY_DIR")/..."
                 mv "$file_path" "$HISTORY_DIR/"
 
                 if [ $? -eq 0 ]; then
-                    log_message "[SUCCESS] File berhasil dipindahkan ke history."
+                    log_message "[SUCCESS] File berhasil dipindahkan ke history lokal."
                 else
-                    log_message "[ERROR] Gagal memindahkan file ke folder history."
+                    log_message "[ERROR] Gagal memindahkan file ke folder history lokal."
                 fi
             else
                 log_message "[ERROR] Gagal mengunggah $file_name ke RustFS. File tetap di folder result."
@@ -100,7 +106,7 @@ process_uploads() {
 cleanup_old_history() {
     if [ -d "$HISTORY_PARENT" ]; then
         log_message "--------------------------------------------------"
-        log_message "[INFO] Membersihkan folder history yang lebih lama dari 3 hari..."
+        log_message "[INFO] Membersihkan folder history lokal yang lebih lama dari 3 hari..."
 
         # Cari dan hapus direktori di dalam folder history yang umurnya > 3 hari
         find "$HISTORY_PARENT" -mindepth 1 -maxdepth 1 -type d -mtime +3 -exec rm -rf {} +
@@ -114,17 +120,28 @@ cleanup_old_history() {
 # ==============================================================================
 
 main() {
+    # Validasi argument minimal 1 (nama bucket)
+    if [ -z "$1" ]; then
+        echo "[ERROR] Argumen bucket belum disertakan."
+        echo "Cara penggunaan: $0 <nama_bucket>"
+        echo "Contoh: $0 local/my-bucket"
+        exit 1
+    fi
+
+    local RUSTFS_BUCKET="$1"
+
     log_message "=== Memulai Proses Upload ke RustFS & Arsip History ==="
     log_message "Waktu Mulai: $(date)"
+    log_message "Target Bucket: $RUSTFS_BUCKET/$CURRENT_DATE/"
 
     check_dependencies
-    load_environment
-    process_uploads
+    validate_bucket "$RUSTFS_BUCKET"
+    process_uploads "$RUSTFS_BUCKET"
     cleanup_old_history
 
     log_message "--------------------------------------------------"
     log_message "=== Proses Selesai. Log disimpan di: $UPLOAD_LOG_FILE ==="
 }
 
-# Jalankan fungsi utama
-main
+# Jalankan fungsi utama dengan argumen pertama
+main "$1"
