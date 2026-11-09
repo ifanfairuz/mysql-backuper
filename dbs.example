@@ -1,0 +1,2 @@
+# DB_HOST DB_NAME DB_USER DB_PASS
+localhost app user user_pass
