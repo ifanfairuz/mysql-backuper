@@ -32,28 +32,29 @@ check_dependencies() {
     fi
 }
 
-validate_bucket() {
-    local bucket_name="$1"
+validate_alias() {
+    local alias_name="$1"
 
-    log_message "[INFO] Memeriksa koneksi bucket via 'rc ping $bucket_name'..."
-    rc ping "$bucket_name" >> "$UPLOAD_LOG_FILE" 2>&1
+    log_message "[INFO] Memeriksa koneksi server via 'rc ping $alias_name'..."
+    rc ping "$alias_name" >> "$UPLOAD_LOG_FILE" 2>&1
     if [ $? -ne 0 ]; then
-        log_message "[ERROR] Gagal melakukan ping ke bucket '$bucket_name'."
+        log_message "[ERROR] Gagal melakukan ping ke alias '$alias_name'."
         exit 1
     fi
 
-    log_message "[INFO] Memeriksa kesiapan bucket via 'rc ready $bucket_name'..."
-    rc ready "$bucket_name" >> "$UPLOAD_LOG_FILE" 2>&1
+    log_message "[INFO] Memeriksa kesiapan server via 'rc ready $alias_name'..."
+    rc ready "$alias_name" >> "$UPLOAD_LOG_FILE" 2>&1
     if [ $? -ne 0 ]; then
-        log_message "[ERROR] Bucket '$bucket_name' belum siap / tidak dapat diakses."
+        log_message "[ERROR] Server dengan alias '$alias_name' belum siap / tidak dapat diakses."
         exit 1
     fi
 
-    log_message "[SUCCESS] Bucket '$bucket_name' valid dan siap digunakan."
+    log_message "[SUCCESS] Alias '$alias_name' valid dan siap digunakan."
 }
 
 process_uploads() {
-    local bucket_name="$1"
+    local alias_name="$1"
+    local bucket_name="$2"
 
     if [ ! -d "$RESULT_DIR" ]; then
         log_message "[INFO] Folder result '$RESULT_DIR' tidak ditemukan. Tidak ada file untuk di-upload."
@@ -74,8 +75,8 @@ process_uploads() {
             local file_name
             file_name=$(basename "$file_path")
 
-            # Target tujuan di RustFS: bucket_name/tanggal/filename
-            local remote_target="$bucket_name/$CURRENT_DATE/$file_name"
+            # Target tujuan di RustFS menggunakan format: alias/bucket_name/tanggal/filename
+            local remote_target="$alias_name/$bucket_name/$CURRENT_DATE/$file_name"
 
             log_message "--------------------------------------------------"
             log_message "[INFO] Memproses file: $file_name"
@@ -120,28 +121,30 @@ cleanup_old_history() {
 # ==============================================================================
 
 main() {
-    # Validasi argument minimal 1 (nama bucket)
-    if [ -z "$1" ]; then
-        echo "[ERROR] Argumen bucket belum disertakan."
-        echo "Cara penggunaan: $0 <nama_bucket>"
-        echo "Contoh: $0 local/my-bucket"
+    # Validasi argumen minimal 2 (alias dan bucket name)
+    if [ -z "$1" ] || [ -z "$2" ]; then
+        echo "[ERROR] Argumen kurang lengkap."
+        echo "Cara penggunaan: $0 <alias> <nama_bucket>"
+        echo "Contoh: $0 local my-backup-bucket"
         exit 1
     fi
 
-    local RUSTFS_BUCKET="$1"
+    local RUSTFS_ALIAS="$1"
+    local RUSTFS_BUCKET="$2"
 
     log_message "=== Memulai Proses Upload ke RustFS & Arsip History ==="
     log_message "Waktu Mulai: $(date)"
-    log_message "Target Bucket: $RUSTFS_BUCKET/$CURRENT_DATE/"
+    log_message "Target Alias : $RUSTFS_ALIAS"
+    log_message "Target Path  : $RUSTFS_ALIAS/$RUSTFS_BUCKET/$CURRENT_DATE/"
 
     check_dependencies
-    validate_bucket "$RUSTFS_BUCKET"
-    process_uploads "$RUSTFS_BUCKET"
+    validate_alias "$RUSTFS_ALIAS"
+    process_uploads "$RUSTFS_ALIAS" "$RUSTFS_BUCKET"
     cleanup_old_history
 
     log_message "--------------------------------------------------"
     log_message "=== Proses Selesai. Log disimpan di: $UPLOAD_LOG_FILE ==="
 }
 
-# Jalankan fungsi utama dengan argumen pertama
-main "$1"
+# Jalankan fungsi utama dengan argumen pertama dan kedua
+main "$1" "$2"
