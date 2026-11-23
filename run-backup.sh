@@ -29,7 +29,7 @@ fi
 
 # shellcheck disable=SC1090
 . "$CONFIG_FILE"
-export S3_REMOTE RCLONE_EXTRA_ARGS MYDUMPER_THREADS EXCLUDE_DBS
+export S3_REMOTE RCLONE_EXTRA_ARGS MYDUMPER_THREADS EXCLUDE_DBS COMPRESS COMPRESS_LEVEL COMPRESS_THREADS
 
 # Upload file tertentu; tanpa argumen file -> upload semua isi result/
 upload() {

@@ -126,6 +126,7 @@ load_existing_config() {
     if [ -f "$CONFIG_FILE" ]; then
         # shellcheck disable=SC1090
         . "$CONFIG_FILE"
+        PREV_COMPRESS="$COMPRESS"
         info "Konfigurasi lama ditemukan di .config, dipakai sebagai nilai default."
     fi
 }
@@ -164,7 +165,7 @@ choose_storage() {
 
 install_apt_packages() {
     title "2. Instalasi Dependensi"
-    local pkgs=(mydumper default-mysql-client pigz tar gzip curl ca-certificates cron util-linux)
+    local pkgs=(mydumper default-mysql-client xz-utils zstd pigz tar gzip curl ca-certificates cron util-linux)
     [ "$STORAGE_TYPE" = "s3" ] && pkgs+=(unzip)
 
     info "Menjalankan apt-get update..."
@@ -416,7 +417,7 @@ configure_databases() {
 }
 
 configure_tuning() {
-    title "5. Performa mydumper"
+    title "5. Performa & Kompresi"
     local cpus threads
     cpus=$(nproc 2>/dev/null || echo 4)
     echo "  Jumlah thread mydumper per database. CPU di mesin ini: $cpus."
@@ -428,6 +429,44 @@ configure_tuning() {
     done
     MYDUMPER_THREADS="$threads"
     ok "mydumper memakai $MYDUMPER_THREADS thread."
+
+    echo
+    echo "  Kompresi arsip (satu file per database):"
+    echo "    1) xz   - ukuran paling kecil, restore cukup tar + xz (bawaan Debian/Ubuntu)"
+    echo "    2) zstd - hampir sekecil xz & lebih cepat, restore butuh paket zstd"
+    echo "    3) gzip - paling kompatibel, ukuran paling besar"
+    echo "    4) tanpa kompresi"
+    local default_choice=1 choice
+    case "$COMPRESS" in zstd) default_choice=2 ;; gzip) default_choice=3 ;; none) default_choice=4 ;; esac
+    while true; do
+        choice=$(ask "Pilih kompresi" "$default_choice")
+        case "$choice" in
+            1) COMPRESS="xz";   local min=0 max=9  def=6 ;;
+            2) COMPRESS="zstd"; local min=1 max=19 def=19 ;;
+            3) COMPRESS="gzip"; local min=1 max=9  def=9 ;;
+            4) COMPRESS="none" ;;
+            *) continue ;;
+        esac
+        break
+    done
+
+    if [ "$COMPRESS" = "none" ]; then
+        COMPRESS_LEVEL=""
+        ok "Arsip tidak dikompres (.tar)."
+        return
+    fi
+
+    # Pakai level lama hanya jika algoritmanya sama dengan sebelumnya
+    local prev_level=""
+    [ "$COMPRESS" = "$PREV_COMPRESS" ] && prev_level="$COMPRESS_LEVEL"
+    local level
+    while true; do
+        level=$(ask "Level kompresi $COMPRESS ($min-$max, lebih tinggi = lebih kecil tapi lebih lambat)" "${prev_level:-$def}")
+        [[ "$level" =~ ^[0-9]+$ ]] && [ "$level" -ge "$min" ] && [ "$level" -le "$max" ] && break
+        echo "  Masukkan angka $min-$max." >&2
+    done
+    COMPRESS_LEVEL="$level"
+    ok "Kompresi: $COMPRESS level $COMPRESS_LEVEL."
 }
 
 # ==============================================================================
@@ -517,6 +556,8 @@ save_config() {
         printf 'CRON_DAYS=%q\n' "${CRON_DAYS:-*}"
         printf 'EXCLUDE_DBS=%q\n' "$EXCLUDE_DBS"
         printf 'MYDUMPER_THREADS=%q\n' "${MYDUMPER_THREADS:-4}"
+        printf 'COMPRESS=%q\n' "${COMPRESS:-xz}"
+        printf 'COMPRESS_LEVEL=%q\n' "$COMPRESS_LEVEL"
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
     chmod +x "$SCRIPT_DIR/backupdb.sh" "$SCRIPT_DIR/upload-rustfs.sh" "$SCRIPT_DIR/upload-s3.sh" "$RUNNER" 2>/dev/null
@@ -532,6 +573,7 @@ summary() {
         s3)     echo "  Target        : $S3_REMOTE:$S3_BUCKET${S3_PREFIX:+/$S3_PREFIX}/<tanggal>/ (rclone)" ;;
     esac
     echo "  Thread dumper : $MYDUMPER_THREADS"
+    echo "  Kompresi      : ${COMPRESS:-xz}${COMPRESS_LEVEL:+ level $COMPRESS_LEVEL}"
     [ -n "$EXCLUDE_DBS" ] && echo "  DB dikecualikan: $EXCLUDE_DBS"
     if [ "$CRON_ENABLED" = "yes" ]; then
         echo "  Cronjob       : jam $CRON_TIME, hari $([ "$CRON_DAYS" = "*" ] && echo "setiap hari" || echo "$CRON_DAYS")"

@@ -14,9 +14,14 @@ GLOBAL_LOG_FILE="$RESULT_DIR/backup_global_${TIMESTAMP}.log"
 #   MYDUMPER_THREADS    jumlah thread mydumper (default 4)
 #   MYDUMPER_EXTRA_ARGS argumen tambahan mydumper, dipisah spasi
 #   EXCLUDE_DBS         DB yang dilewati saat auto-discover (baris dbs dengan nama '*'), dipisah spasi
+#   COMPRESS            xz (default, paling kecil) | zstd | gzip | none
+#   COMPRESS_LEVEL      level kompresi (default: xz 6, zstd 19, gzip 9)
+#   COMPRESS_THREADS    thread kompresor xz/zstd (default 0 = semua core)
 #   POST_DB_HOOK        perintah yang dipanggil setelah arsip satu DB selesai:
-#                       "$POST_DB_HOOK" <archive.tar.gz> <db.log>   (contoh: upload langsung per DB)
+#                       "$POST_DB_HOOK" <archive> <db.log>   (contoh: upload langsung per DB)
 MYDUMPER_THREADS="${MYDUMPER_THREADS:-4}"
+COMPRESS="${COMPRESS:-xz}"
+COMPRESS_THREADS="${COMPRESS_THREADS:-0}"
 SYSTEM_DBS="information_schema performance_schema mysql sys"
 
 # Buat direktori result jika belum ada
@@ -39,6 +44,63 @@ check_dependencies() {
         log_global "  sudo yum install mydumper      # RHEL/CentOS"
         exit 1
     fi
+}
+
+# Tentukan perintah kompresor (COMP_CMD) & ekstensi arsip (COMP_EXT) sekali di awal
+resolve_compression() {
+    local algo="$COMPRESS" level="$COMPRESS_LEVEL" min max default
+
+    case "$algo" in
+        xz|zstd|gzip|none) ;;
+        *) log_global "[WARN] COMPRESS='$algo' tidak dikenal, memakai xz."; algo="xz" ;;
+    esac
+
+    if [ "$algo" != "none" ] && [ "$algo" != "gzip" ] && ! command -v "$algo" &> /dev/null; then
+        log_global "[WARN] Binary '$algo' tidak ditemukan, fallback ke gzip."
+        algo="gzip"; level=""
+    fi
+
+    case "$algo" in
+        xz)   min=0; max=9;  default=6 ;;
+        zstd) min=1; max=19; default=19 ;;
+        gzip) min=1; max=9;  default=9 ;;
+    esac
+    if [ "$algo" != "none" ]; then
+        if [ -z "$level" ]; then
+            level="$default"
+        elif ! [[ "$level" =~ ^[0-9]+$ ]] || [ "$level" -lt "$min" ] || [ "$level" -gt "$max" ]; then
+            log_global "[WARN] COMPRESS_LEVEL='$level' tidak valid untuk $algo ($min-$max), memakai $default."
+            level="$default"
+        fi
+    fi
+
+    case "$algo" in
+        xz)   COMP_CMD=(xz -T"$COMPRESS_THREADS" -"$level" -c); COMP_EXT="tar.xz" ;;
+        zstd) COMP_CMD=(zstd -T"$COMPRESS_THREADS" -"$level" --long=27 -q -c); COMP_EXT="tar.zst" ;;
+        gzip)
+            if command -v pigz &> /dev/null; then COMP_CMD=(pigz -"$level" -c); else COMP_CMD=(gzip -"$level" -c); fi
+            COMP_EXT="tar.gz" ;;
+        none) COMP_CMD=(); COMP_EXT="tar"; level="" ;;
+    esac
+
+    log_global "[INFO] Kompresi: $algo${level:+ level $level} -> .$COMP_EXT"
+}
+
+# Bungkus direktori dump menjadi satu arsip (satu stream tar -> kompresor)
+compress_archive() {
+    local src="$1" dest="$2"
+    (
+        set -o pipefail
+        if [ ${#COMP_CMD[@]} -eq 0 ]; then
+            tar -cf "$dest" -C "$(dirname "$src")" "$(basename "$src")"
+        else
+            tar -cf - -C "$(dirname "$src")" "$(basename "$src")" | nice -n 10 "${COMP_CMD[@]}" > "$dest"
+        fi
+    ) || { rm -f "$dest"; return 1; }
+}
+
+human_size() {
+    numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "${1}B"
 }
 
 # Ambil daftar DB dari server, tanpa system DB dan EXCLUDE_DBS
@@ -72,7 +134,7 @@ process_database() {
     local pass="$4"
 
     local temp_backup_dir="$RESULT_DIR/temp_${db_name}_${TIMESTAMP}"
-    local archive_name="$RESULT_DIR/backup_${db_name}_${TIMESTAMP}.tar.gz"
+    local archive_name="$RESULT_DIR/backup_${db_name}_${TIMESTAMP}.${COMP_EXT}"
     local db_log_file="$RESULT_DIR/backup_${db_name}_${TIMESTAMP}.log"
 
     log_global "--------------------------------------------------"
@@ -104,17 +166,19 @@ process_database() {
         log_global "[SUCCESS] Mydumper selesai untuk database: $db_name"
         echo "[SUCCESS] Mydumper selesai tanpa error." >> "$db_log_file"
 
-        # Kompresi Arsip (.tar.gz)
+        # Kompresi arsip (satu stream per DB untuk rasio terbaik)
         log_global "[INFO] Mengompresi ke $(basename "$archive_name")..."
-        if command -v pigz &> /dev/null; then
-            tar -I pigz -cf "$archive_name" -C "$(dirname "$temp_backup_dir")" "$(basename "$temp_backup_dir")" >> "$db_log_file" 2>&1
-        else
-            tar -czf "$archive_name" -C "$(dirname "$temp_backup_dir")" "$(basename "$temp_backup_dir")" >> "$db_log_file" 2>&1
-        fi
+        local raw_bytes start_ts
+        raw_bytes=$(du -sb "$temp_backup_dir" 2>/dev/null | cut -f1)
+        start_ts=$(date +%s)
 
-        if [ $? -eq 0 ]; then
+        if compress_archive "$temp_backup_dir" "$archive_name" >> "$db_log_file" 2>&1; then
+            local arc_bytes ratio
+            arc_bytes=$(stat -c %s "$archive_name" 2>/dev/null || echo 0)
+            ratio=$(awk -v r="${raw_bytes:-0}" -v a="$arc_bytes" 'BEGIN { if (a > 0) printf "%.1fx", r / a; else print "-" }')
             log_global "[SUCCESS] Arsip berhasil dibuat: $(basename "$archive_name")"
-            echo "[SUCCESS] Kompresi arsip berhasil." >> "$db_log_file"
+            log_global "[INFO] Ukuran: $(human_size "${raw_bytes:-0}") -> $(human_size "$arc_bytes") (rasio $ratio, $(( $(date +%s) - start_ts ))s)"
+            echo "[SUCCESS] Kompresi arsip berhasil (rasio $ratio)." >> "$db_log_file"
         else
             log_global "[ERROR] Gagal mengompresi arsip untuk $db_name."
             echo "[ERROR] Gagal mengompresi arsip." >> "$db_log_file"
@@ -147,8 +211,9 @@ process_database() {
 main() {
     log_global "=== Memulai Proses Backup Multi-Database ==="
 
-    # 1. Cek dependensi sistem
+    # 1. Cek dependensi sistem & tentukan kompresi
     check_dependencies
+    resolve_compression
 
     # 2. Cek file konfigurasi dbs
     if [ ! -f "$CONFIG_FILE" ]; then
