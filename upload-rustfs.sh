@@ -13,7 +13,7 @@ HISTORY_DIR="$HISTORY_PARENT/$CURRENT_DATE"
 
 # Pastikan folder history harian ada terlebih dahulu untuk menampung log
 mkdir -p "$HISTORY_DIR"
-UPLOAD_LOG_FILE="$HISTORY_DIR/upload_log_${CURRENT_TIME}.log"
+UPLOAD_LOG_FILE="${UPLOAD_LOG_FILE:-$HISTORY_DIR/upload_log_${CURRENT_TIME}.log}"
 
 # ==============================================================================
 # Fungsi Pendukung
@@ -52,56 +52,74 @@ validate_alias() {
     log_message "[SUCCESS] Alias '$alias_name' valid dan siap digunakan."
 }
 
+# Upload satu file lalu pindahkan ke history lokal. Return 1 jika gagal.
+upload_one() {
+    local alias_name="$1" bucket_name="$2" file_path="$3"
+    local file_name
+    file_name=$(basename "$file_path")
+
+    # Target tujuan di RustFS: alias/bucket/tanggal/filename
+    local remote_target="$alias_name/$bucket_name/$CURRENT_DATE/$file_name"
+
+    log_message "--------------------------------------------------"
+    log_message "[INFO] Memproses file: $file_name"
+
+    if [ ! -f "$file_path" ]; then
+        log_message "[ERROR] File '$file_path' tidak ditemukan."
+        return 1
+    fi
+
+    log_message "[INFO] Mengunggah ke RustFS -> $remote_target..."
+    if ! rc object copy "$file_path" "$remote_target" >> "$UPLOAD_LOG_FILE" 2>&1; then
+        log_message "[ERROR] Gagal mengunggah $file_name ke RustFS. File tetap di tempat semula."
+        return 1
+    fi
+    log_message "[SUCCESS] Berhasil mengunggah $file_name ke RustFS."
+
+    log_message "[INFO] Memindahkan $file_name ke $(basename "$HISTORY_DIR")/..."
+    if mv "$file_path" "$HISTORY_DIR/"; then
+        log_message "[SUCCESS] File berhasil dipindahkan ke history lokal."
+    else
+        log_message "[ERROR] Gagal memindahkan file ke folder history lokal."
+    fi
+}
+
+# Upload semua file di folder result/
 process_uploads() {
     local alias_name="$1"
     local bucket_name="$2"
 
     if [ ! -d "$RESULT_DIR" ]; then
         log_message "[INFO] Folder result '$RESULT_DIR' tidak ditemukan. Tidak ada file untuk di-upload."
-        return
+        return 0
     fi
 
-    # Hitung jumlah file di dalam folder result
     local file_count
     file_count=$(find "$RESULT_DIR" -maxdepth 1 -type f | wc -l)
-
     if [ "$file_count" -eq 0 ]; then
         log_message "[INFO] Tidak ada file ditemukan di dalam folder result."
-        return
+        return 0
     fi
 
+    local failed=0 file_path
     for file_path in "$RESULT_DIR"/*; do
-        if [ -f "$file_path" ]; then
-            local file_name
-            file_name=$(basename "$file_path")
-
-            # Target tujuan di RustFS menggunakan format: alias/bucket_name/tanggal/filename
-            local remote_target="$alias_name/$bucket_name/$CURRENT_DATE/$file_name"
-
-            log_message "--------------------------------------------------"
-            log_message "[INFO] Memproses file: $file_name"
-
-            # Eksekusi upload menggunakan client 'rc object copy'
-            log_message "[INFO] Mengunggah ke RustFS -> $remote_target..."
-            rc object copy "$file_path" "$remote_target" >> "$UPLOAD_LOG_FILE" 2>&1
-
-            if [ $? -eq 0 ]; then
-                log_message "[SUCCESS] Berhasil mengunggah $file_name ke RustFS."
-
-                # Pindahkan file ke folder history/tanggal lokal
-                log_message "[INFO] Memindahkan $file_name ke $(basename "$HISTORY_DIR")/..."
-                mv "$file_path" "$HISTORY_DIR/"
-
-                if [ $? -eq 0 ]; then
-                    log_message "[SUCCESS] File berhasil dipindahkan ke history lokal."
-                else
-                    log_message "[ERROR] Gagal memindahkan file ke folder history lokal."
-                fi
-            else
-                log_message "[ERROR] Gagal mengunggah $file_name ke RustFS. File tetap di folder result."
-            fi
-        fi
+        [ -f "$file_path" ] || continue
+        upload_one "$alias_name" "$bucket_name" "$file_path" || failed=1
     done
+    return $failed
+}
+
+# Upload hanya file-file tertentu (dipakai pipeline per database)
+process_files() {
+    local alias_name="$1"
+    local bucket_name="$2"
+    shift 2
+
+    local failed=0 file_path
+    for file_path in "$@"; do
+        upload_one "$alias_name" "$bucket_name" "$file_path" || failed=1
+    done
+    return $failed
 }
 
 cleanup_old_history() {
@@ -124,13 +142,15 @@ main() {
     # Validasi argumen minimal 2 (alias dan bucket name)
     if [ -z "$1" ] || [ -z "$2" ]; then
         echo "[ERROR] Argumen kurang lengkap."
-        echo "Cara penggunaan: $0 <alias> <nama_bucket>"
+        echo "Cara penggunaan: $0 <alias> <nama_bucket> [file...]"
         echo "Contoh: $0 local my-backup-bucket"
+        echo "Tanpa [file...], semua file di folder result/ akan di-upload."
         exit 1
     fi
 
     local RUSTFS_ALIAS="$1"
     local RUSTFS_BUCKET="$2"
+    local status=0
 
     log_message "=== Memulai Proses Upload ke RustFS & Arsip History ==="
     log_message "Waktu Mulai: $(date)"
@@ -139,12 +159,17 @@ main() {
 
     check_dependencies
     validate_alias "$RUSTFS_ALIAS"
-    process_uploads "$RUSTFS_ALIAS" "$RUSTFS_BUCKET"
-    cleanup_old_history
+
+    if [ $# -gt 2 ]; then
+        process_files "$@" || status=1
+    else
+        process_uploads "$RUSTFS_ALIAS" "$RUSTFS_BUCKET" || status=1
+        cleanup_old_history
+    fi
 
     log_message "--------------------------------------------------"
     log_message "=== Proses Selesai. Log disimpan di: $UPLOAD_LOG_FILE ==="
+    exit $status
 }
 
-# Jalankan fungsi utama dengan argumen pertama dan kedua
-main "$1" "$2"
+main "$@"

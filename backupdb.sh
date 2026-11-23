@@ -10,6 +10,15 @@ RESULT_DIR="$SCRIPT_DIR/result"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 GLOBAL_LOG_FILE="$RESULT_DIR/backup_global_${TIMESTAMP}.log"
 
+# Pengaturan opsional via environment:
+#   MYDUMPER_THREADS    jumlah thread mydumper (default 4)
+#   MYDUMPER_EXTRA_ARGS argumen tambahan mydumper, dipisah spasi
+#   EXCLUDE_DBS         DB yang dilewati saat auto-discover (baris dbs dengan nama '*'), dipisah spasi
+#   POST_DB_HOOK        perintah yang dipanggil setelah arsip satu DB selesai:
+#                       "$POST_DB_HOOK" <archive.tar.gz> <db.log>   (contoh: upload langsung per DB)
+MYDUMPER_THREADS="${MYDUMPER_THREADS:-4}"
+SYSTEM_DBS="information_schema performance_schema mysql sys"
+
 # Buat direktori result jika belum ada
 mkdir -p "$RESULT_DIR"
 
@@ -30,6 +39,30 @@ check_dependencies() {
         log_global "  sudo yum install mydumper      # RHEL/CentOS"
         exit 1
     fi
+}
+
+# Ambil daftar DB dari server, tanpa system DB dan EXCLUDE_DBS
+discover_databases() {
+    local host="$1" user="$2" pass="$3"
+
+    if ! command -v mysql &> /dev/null; then
+        log_global "[ERROR] Client 'mysql' dibutuhkan untuk auto-discover (sudo apt-get install default-mysql-client)." >&2
+        return 1
+    fi
+
+    local list
+    if ! list=$(MYSQL_PWD="$pass" mysql -h "$host" -u "$user" -N -B -e "SHOW DATABASES" 2>&1); then
+        log_global "[ERROR] Gagal mengambil daftar database dari '$host': $list" >&2
+        return 1
+    fi
+
+    local db skip
+    for db in $list; do
+        for skip in $SYSTEM_DBS $EXCLUDE_DBS; do
+            [ "$db" = "$skip" ] && continue 2
+        done
+        echo "$db"
+    done
 }
 
 process_database() {
@@ -63,6 +96,8 @@ process_database() {
         --user="$user" \
         --password="$pass" \
         --outputdir="$temp_backup_dir" \
+        --threads="$MYDUMPER_THREADS" \
+        $MYDUMPER_EXTRA_ARGS \
         --verbose=3 >> "$db_log_file" 2>&1
 
     if [ $? -eq 0 ]; then
@@ -93,6 +128,16 @@ process_database() {
     [ -d "$temp_backup_dir" ] && rm -rf "$temp_backup_dir"
 
     echo "Waktu Selesai: $(date)" >> "$db_log_file"
+
+    # Pipeline: langsung proses (misal upload) arsip DB ini sebelum lanjut ke DB berikutnya
+    if [ -n "$POST_DB_HOOK" ] && [ -f "$archive_name" ]; then
+        log_global "[INFO] Menjalankan hook untuk $(basename "$archive_name")..."
+        if "$POST_DB_HOOK" "$archive_name" "$db_log_file" >> "$GLOBAL_LOG_FILE" 2>&1; then
+            log_global "[SUCCESS] Hook selesai untuk database: $db_name"
+        else
+            log_global "[ERROR] Hook gagal untuk database: $db_name. File tetap di folder result."
+        fi
+    fi
 }
 
 # ==============================================================================
@@ -109,16 +154,28 @@ main() {
     if [ ! -f "$CONFIG_FILE" ]; then
         log_global "[ERROR] File konfigurasi '$CONFIG_FILE' tidak ditemukan!"
         log_global "Buat file dengan format per baris: host dbname user pass"
+        log_global "Gunakan '*' sebagai dbname untuk mem-backup semua database di host tersebut."
         exit 1
     fi
 
     # 3. Baca file dbs baris per baris
-    while read -r db_host db_name db_user db_pass || [ -n "$db_host" ]; do
+    while read -r db_host db_name db_user db_pass <&3 || [ -n "$db_host" ]; do
         # Lewati baris kosong atau komentar
         [[ -z "$db_host" || "$db_host" =~ ^# ]] && continue
 
-        process_database "$db_host" "$db_name" "$db_user" "$db_pass"
-    done < "$CONFIG_FILE"
+        if [ "$db_name" = "*" ]; then
+            log_global "[INFO] Auto-discover database di host '$db_host'..."
+            local discovered
+            discovered=$(discover_databases "$db_host" "$db_user" "$db_pass") || continue
+            log_global "[INFO] Ditemukan $(echo "$discovered" | grep -c .) database: $(echo $discovered)"
+            local d
+            for d in $discovered; do
+                process_database "$db_host" "$d" "$db_user" "$db_pass"
+            done
+        else
+            process_database "$db_host" "$db_name" "$db_user" "$db_pass"
+        fi
+    done 3< "$CONFIG_FILE"
 
     log_global "--------------------------------------------------"
     log_global "=== Semua Proses Backup Selesai. Hasil disimpan di: $RESULT_DIR ==="

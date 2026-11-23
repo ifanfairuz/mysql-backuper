@@ -1,1 +1,4 @@
 .config
+dbs
+cron.log
+.run.lock

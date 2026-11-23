@@ -13,7 +13,7 @@ HISTORY_DIR="$HISTORY_PARENT/$CURRENT_DATE"
 
 # Pastikan folder history harian ada terlebih dahulu untuk menampung log
 mkdir -p "$HISTORY_DIR"
-UPLOAD_LOG_FILE="$HISTORY_DIR/upload_log_${CURRENT_TIME}.log"
+UPLOAD_LOG_FILE="${UPLOAD_LOG_FILE:-$HISTORY_DIR/upload_log_${CURRENT_TIME}.log}"
 
 # Argumen tambahan untuk aws CLI (misal: --endpoint-url untuk S3-compatible)
 AWS_ARGS=()
@@ -50,50 +50,72 @@ validate_bucket() {
     log_message "[SUCCESS] Bucket '$bucket_name' valid dan siap digunakan."
 }
 
+# Upload satu file lalu pindahkan ke history lokal. Return 1 jika gagal.
+upload_one() {
+    local base_target="$1" file_path="$2"
+    local file_name
+    file_name=$(basename "$file_path")
+
+    # Target tujuan di S3: s3://bucket[/prefix]/tanggal/filename
+    local remote_target="$base_target/$file_name"
+
+    log_message "--------------------------------------------------"
+    log_message "[INFO] Memproses file: $file_name"
+
+    if [ ! -f "$file_path" ]; then
+        log_message "[ERROR] File '$file_path' tidak ditemukan."
+        return 1
+    fi
+
+    log_message "[INFO] Mengunggah ke S3 -> $remote_target..."
+    if ! aws "${AWS_ARGS[@]}" s3 cp "$file_path" "$remote_target" --only-show-errors >> "$UPLOAD_LOG_FILE" 2>&1; then
+        log_message "[ERROR] Gagal mengunggah $file_name ke S3. File tetap di tempat semula."
+        return 1
+    fi
+    log_message "[SUCCESS] Berhasil mengunggah $file_name ke S3."
+
+    log_message "[INFO] Memindahkan $file_name ke $(basename "$HISTORY_DIR")/..."
+    if mv "$file_path" "$HISTORY_DIR/"; then
+        log_message "[SUCCESS] File berhasil dipindahkan ke history lokal."
+    else
+        log_message "[ERROR] Gagal memindahkan file ke folder history lokal."
+    fi
+}
+
+# Upload semua file di folder result/
 process_uploads() {
     local base_target="$1"
 
     if [ ! -d "$RESULT_DIR" ]; then
         log_message "[INFO] Folder result '$RESULT_DIR' tidak ditemukan. Tidak ada file untuk di-upload."
-        return
+        return 0
     fi
 
-    # Hitung jumlah file di dalam folder result
     local file_count
     file_count=$(find "$RESULT_DIR" -maxdepth 1 -type f | wc -l)
-
     if [ "$file_count" -eq 0 ]; then
         log_message "[INFO] Tidak ada file ditemukan di dalam folder result."
-        return
+        return 0
     fi
 
+    local failed=0 file_path
     for file_path in "$RESULT_DIR"/*; do
-        if [ -f "$file_path" ]; then
-            local file_name
-            file_name=$(basename "$file_path")
-
-            # Target tujuan di S3: s3://bucket[/prefix]/tanggal/filename
-            local remote_target="$base_target/$file_name"
-
-            log_message "--------------------------------------------------"
-            log_message "[INFO] Memproses file: $file_name"
-
-            log_message "[INFO] Mengunggah ke S3 -> $remote_target..."
-            if aws "${AWS_ARGS[@]}" s3 cp "$file_path" "$remote_target" --only-show-errors >> "$UPLOAD_LOG_FILE" 2>&1; then
-                log_message "[SUCCESS] Berhasil mengunggah $file_name ke S3."
-
-                # Pindahkan file ke folder history/tanggal lokal
-                log_message "[INFO] Memindahkan $file_name ke $(basename "$HISTORY_DIR")/..."
-                if mv "$file_path" "$HISTORY_DIR/"; then
-                    log_message "[SUCCESS] File berhasil dipindahkan ke history lokal."
-                else
-                    log_message "[ERROR] Gagal memindahkan file ke folder history lokal."
-                fi
-            else
-                log_message "[ERROR] Gagal mengunggah $file_name ke S3. File tetap di folder result."
-            fi
-        fi
+        [ -f "$file_path" ] || continue
+        upload_one "$base_target" "$file_path" || failed=1
     done
+    return $failed
+}
+
+# Upload hanya file-file tertentu (dipakai pipeline per database)
+process_files() {
+    local base_target="$1"
+    shift 1
+
+    local failed=0 file_path
+    for file_path in "$@"; do
+        upload_one "$base_target" "$file_path" || failed=1
+    done
+    return $failed
 }
 
 cleanup_old_history() {
@@ -115,8 +137,9 @@ cleanup_old_history() {
 main() {
     if [ -z "$1" ]; then
         echo "[ERROR] Argumen kurang lengkap."
-        echo "Cara penggunaan: $0 <nama_bucket> [prefix]"
+        echo "Cara penggunaan: $0 <nama_bucket> [prefix] [file...]"
         echo "Contoh: $0 my-backup-bucket mysql"
+        echo "Tanpa [file...], semua file di folder result/ akan di-upload (prefix boleh \"\")."
         echo "Env opsional: AWS_PROFILE, S3_ENDPOINT_URL (untuk S3-compatible seperti MinIO/R2/Wasabi)"
         exit 1
     fi
@@ -139,13 +162,22 @@ main() {
     [ -n "$AWS_PROFILE" ] && log_message "AWS Profile  : $AWS_PROFILE"
     [ -n "$S3_ENDPOINT_URL" ] && log_message "Endpoint URL : $S3_ENDPOINT_URL"
 
+    local status=0
+
     check_dependencies
     validate_bucket "$S3_BUCKET"
-    process_uploads "$BASE_TARGET"
-    cleanup_old_history
+
+    if [ $# -gt 2 ]; then
+        shift 2
+        process_files "$BASE_TARGET" "$@" || status=1
+    else
+        process_uploads "$BASE_TARGET" || status=1
+        cleanup_old_history
+    fi
 
     log_message "--------------------------------------------------"
     log_message "=== Proses Selesai. Log disimpan di: $UPLOAD_LOG_FILE ==="
+    exit $status
 }
 
 main "$@"
