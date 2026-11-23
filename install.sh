@@ -4,7 +4,7 @@
 # Installer interaktif mysql-backuper (Debian / Ubuntu)
 #
 # - Menanyakan pengaturan (storage tujuan, daftar database, jadwal cron)
-# - Menginstal dependensi (mydumper, pigz, rc / aws cli, cron)
+# - Menginstal dependensi (mydumper, pigz, rc / rclone, cron)
 # - Menyimpan pengaturan ke .config dan daftar database ke dbs
 #
 # Jalankan sebagai user yang nantinya menjalankan backup (bukan wajib root);
@@ -104,7 +104,7 @@ check_os() {
 setup_sudo() {
     if [ "$EUID" -eq 0 ]; then
         SUDO=""
-        warn "Berjalan sebagai root: konfigurasi rc/aws dan cron akan dibuat untuk user root."
+        warn "Berjalan sebagai root: konfigurasi rc/rclone dan cron akan dibuat untuk user root."
     elif command -v sudo &> /dev/null; then
         SUDO="sudo"
         info "Perintah instalasi paket akan memakai sudo."
@@ -116,8 +116,8 @@ setup_sudo() {
 
 detect_arch() {
     case "$(uname -m)" in
-        x86_64|amd64)  ARCH_RC="amd64"; ARCH_AWS="x86_64" ;;
-        aarch64|arm64) ARCH_RC="arm64"; ARCH_AWS="aarch64" ;;
+        x86_64|amd64)  ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
         *) die "Arsitektur $(uname -m) tidak didukung." ;;
     esac
 }
@@ -137,7 +137,7 @@ load_existing_config() {
 choose_storage() {
     title "1. Tujuan Upload Backup"
     echo "  1) RustFS (client 'rc')"
-    echo "  2) S3 / S3-compatible (AWS CLI) - AWS, MinIO, R2, Wasabi, dll"
+    echo "  2) S3 / S3-compatible (rclone) - AWS, Cloudflare R2, MinIO, Wasabi, dll"
     echo "  3) Lokal saja (tanpa upload)"
 
     local default_choice=1
@@ -194,12 +194,12 @@ install_rc() {
         version="$RC_FALLBACK_VERSION"
     fi
 
-    local archive="rustfs-cli-linux-${ARCH_RC}-${version}.tar.gz"
+    local archive="rustfs-cli-linux-${ARCH}-${version}.tar.gz"
     local url="https://github.com/rustfs/cli/releases/download/${version}/${archive}"
     local tmp
     tmp=$(mktemp -d)
 
-    info "Mengunduh rc $version ($ARCH_RC)..."
+    info "Mengunduh rc $version ($ARCH)..."
     curl -fL --progress-bar -o "$tmp/$archive" "$url" || { rm -rf "$tmp"; die "Gagal mengunduh $url"; }
     tar -xzf "$tmp/$archive" -C "$tmp" || { rm -rf "$tmp"; die "Gagal mengekstrak $archive"; }
 
@@ -212,22 +212,26 @@ install_rc() {
     ok "rc terinstal: $(/usr/local/bin/rc --version 2>/dev/null | head -n1)"
 }
 
-install_aws() {
-    if command -v aws &> /dev/null; then
-        ok "AWS CLI sudah terinstal: $(aws --version 2>&1)"
-        return
+install_rclone() {
+    if command -v rclone &> /dev/null; then
+        ok "rclone sudah terinstal: $(rclone version 2>/dev/null | head -n1)"
+        ask_yes_no "Install ulang / update rclone ke versi terbaru?" "n" || return
     fi
 
     local tmp
     tmp=$(mktemp -d)
-    info "Mengunduh AWS CLI v2 ($ARCH_AWS)..."
-    curl -fL --progress-bar -o "$tmp/awscliv2.zip" "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH_AWS}.zip" \
-        || { rm -rf "$tmp"; die "Gagal mengunduh AWS CLI."; }
-    unzip -q "$tmp/awscliv2.zip" -d "$tmp" || { rm -rf "$tmp"; die "Gagal mengekstrak AWS CLI."; }
-    $SUDO "$tmp/aws/install" --update || { rm -rf "$tmp"; die "Instalasi AWS CLI gagal."; }
+    info "Mengunduh rclone versi terbaru ($ARCH)..."
+    curl -fL --progress-bar -o "$tmp/rclone.zip" "https://downloads.rclone.org/rclone-current-linux-${ARCH}.zip" \
+        || { rm -rf "$tmp"; die "Gagal mengunduh rclone."; }
+    unzip -q "$tmp/rclone.zip" -d "$tmp" || { rm -rf "$tmp"; die "Gagal mengekstrak rclone."; }
+
+    local bin
+    bin=$(find "$tmp" -type f -name rclone | head -n1)
+    [ -n "$bin" ] || { rm -rf "$tmp"; die "Binary rclone tidak ditemukan di dalam arsip."; }
+    $SUDO install -m 0755 "$bin" /usr/local/bin/rclone || { rm -rf "$tmp"; die "Gagal memasang rclone ke /usr/local/bin."; }
     rm -rf "$tmp"
     hash -r
-    ok "AWS CLI terinstal: $(aws --version 2>&1)"
+    ok "rclone terinstal: $(/usr/local/bin/rclone version 2>/dev/null | head -n1)"
 }
 
 # ==============================================================================
@@ -264,38 +268,66 @@ configure_rustfs() {
 }
 
 configure_s3() {
-    title "3. Konfigurasi S3"
-    AWS_PROFILE=$(ask_required "Nama profile AWS CLI" "${AWS_PROFILE:-mysql-backuper}")
+    title "3. Konfigurasi S3 (rclone)"
+    S3_REMOTE=$(ask_required "Nama remote rclone" "${S3_REMOTE:-s3backup}")
     S3_BUCKET=$(ask_required "Nama bucket" "$S3_BUCKET")
     S3_PREFIX=$(ask "Prefix folder di bucket (kosongkan jika tidak ada)" "$S3_PREFIX")
-    S3_ENDPOINT_URL=$(ask "Endpoint URL (kosongkan untuk AWS S3; isi untuk MinIO/R2/Wasabi)" "$S3_ENDPOINT_URL")
 
     local configure=0
-    if aws configure get aws_access_key_id --profile "$AWS_PROFILE" &> /dev/null; then
-        ask_yes_no "Profile '$AWS_PROFILE' sudah memiliki kredensial. Atur ulang?" "n" && configure=1
+    if rclone listremotes 2>/dev/null | grep -qxF "${S3_REMOTE}:"; then
+        ask_yes_no "Remote '$S3_REMOTE' sudah ada. Atur ulang provider & kredensial?" "n" && configure=1
     else
         configure=1
     fi
 
     if [ "$configure" -eq 1 ]; then
-        local access secret region
+        echo "  Provider S3:"
+        echo "    1) AWS S3"
+        echo "    2) Cloudflare R2"
+        echo "    3) MinIO"
+        echo "    4) Wasabi"
+        echo "    5) DigitalOcean Spaces"
+        echo "    6) Lainnya (S3-compatible)"
+        local choice provider default_region endpoint_hint
+        while true; do
+            choice=$(ask "Pilih provider" "1")
+            case "$choice" in
+                1) provider="AWS";          default_region="ap-southeast-1"; endpoint_hint="kosongkan untuk AWS" ;;
+                2) provider="Cloudflare";   default_region="auto";           endpoint_hint="https://<account_id>.r2.cloudflarestorage.com" ;;
+                3) provider="Minio";        default_region="us-east-1";      endpoint_hint="http://10.0.0.5:9000" ;;
+                4) provider="Wasabi";       default_region="ap-southeast-1"; endpoint_hint="https://s3.ap-southeast-1.wasabisys.com" ;;
+                5) provider="DigitalOcean"; default_region="sgp1";           endpoint_hint="https://sgp1.digitaloceanspaces.com" ;;
+                6) provider="Other";        default_region="us-east-1";      endpoint_hint="https://s3.example.com" ;;
+                *) continue ;;
+            esac
+            break
+        done
+
+        local access secret region endpoint
         access=$(ask_required "Access key ID" "")
         secret=$(ask_secret "Secret access key")
-        region=$(ask_required "Region (contoh: ap-southeast-1, 'auto' untuk R2)" "$(aws configure get region --profile "$AWS_PROFILE" 2>/dev/null || echo us-east-1)")
-        aws configure set aws_access_key_id "$access" --profile "$AWS_PROFILE"
-        aws configure set aws_secret_access_key "$secret" --profile "$AWS_PROFILE"
-        aws configure set region "$region" --profile "$AWS_PROFILE"
-        ok "Kredensial profile '$AWS_PROFILE' disimpan di ~/.aws."
+        region=$(ask_required "Region" "$default_region")
+        if [ "$provider" = "AWS" ]; then
+            endpoint=$(ask "Endpoint ($endpoint_hint)" "")
+        else
+            endpoint=$(ask_required "Endpoint ($endpoint_hint)" "")
+        fi
+
+        local params=(provider="$provider" access_key_id="$access" secret_access_key="$secret" region="$region" no_check_bucket=true)
+        [ -n "$endpoint" ] && params+=(endpoint="$endpoint")
+
+        rclone config delete "$S3_REMOTE" &> /dev/null
+        rclone config create "$S3_REMOTE" s3 "${params[@]}" --non-interactive > /dev/null \
+            || die "Gagal membuat remote rclone '$S3_REMOTE'."
+        chmod 600 "$(rclone config file 2>/dev/null | tail -n1)" 2>/dev/null
+        ok "Remote '$S3_REMOTE' ($provider) disimpan di $(rclone config file 2>/dev/null | tail -n1)."
     fi
 
-    local aws_args=(--profile "$AWS_PROFILE")
-    [ -n "$S3_ENDPOINT_URL" ] && aws_args+=(--endpoint-url "$S3_ENDPOINT_URL")
-
     info "Menguji akses bucket '$S3_BUCKET'..."
-    if aws "${aws_args[@]}" s3api head-bucket --bucket "$S3_BUCKET" &> /dev/null; then
+    if rclone lsf "$S3_REMOTE:$S3_BUCKET" --max-depth 1 --dirs-only &> /dev/null; then
         ok "Bucket dapat diakses."
     elif ask_yes_no "Bucket tidak dapat diakses. Coba buat bucket '$S3_BUCKET'?" "n"; then
-        if aws "${aws_args[@]}" s3 mb "s3://$S3_BUCKET"; then
+        if rclone mkdir "$S3_REMOTE:$S3_BUCKET"; then
             ok "Bucket dibuat."
         else
             warn "Gagal membuat bucket. Periksa kredensial/permission."
@@ -479,8 +511,7 @@ save_config() {
         printf 'RUSTFS_BUCKET=%q\n' "$RUSTFS_BUCKET"
         printf 'S3_BUCKET=%q\n' "$S3_BUCKET"
         printf 'S3_PREFIX=%q\n' "$S3_PREFIX"
-        printf 'AWS_PROFILE=%q\n' "$AWS_PROFILE"
-        printf 'S3_ENDPOINT_URL=%q\n' "$S3_ENDPOINT_URL"
+        printf 'S3_REMOTE=%q\n' "$S3_REMOTE"
         printf 'CRON_ENABLED=%q\n' "${CRON_ENABLED:-no}"
         printf 'CRON_TIME=%q\n' "$CRON_TIME"
         printf 'CRON_DAYS=%q\n' "${CRON_DAYS:-*}"
@@ -498,7 +529,7 @@ summary() {
     echo "  Tujuan upload : $STORAGE_TYPE"
     case "$STORAGE_TYPE" in
         rustfs) echo "  Target        : $RUSTFS_ALIAS/$RUSTFS_BUCKET/<tanggal>/" ;;
-        s3)     echo "  Target        : s3://$S3_BUCKET${S3_PREFIX:+/$S3_PREFIX}/<tanggal>/ (profile: $AWS_PROFILE)" ;;
+        s3)     echo "  Target        : $S3_REMOTE:$S3_BUCKET${S3_PREFIX:+/$S3_PREFIX}/<tanggal>/ (rclone)" ;;
     esac
     echo "  Thread dumper : $MYDUMPER_THREADS"
     [ -n "$EXCLUDE_DBS" ] && echo "  DB dikecualikan: $EXCLUDE_DBS"
@@ -542,7 +573,7 @@ main() {
     install_apt_packages
     case "$STORAGE_TYPE" in
         rustfs) install_rc; configure_rustfs ;;
-        s3)     install_aws; configure_s3 ;;
+        s3)     install_rclone; configure_s3 ;;
         local)  title "3. Konfigurasi Storage"; info "Mode lokal: hasil backup tetap di folder result/." ;;
     esac
     configure_databases

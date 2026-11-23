@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/.config"
 LOCK_FILE="$SCRIPT_DIR/.run.lock"
 
-# Cron memakai PATH minimal; pastikan /usr/local/bin (rc, aws) ikut terbaca
+# Cron memakai PATH minimal; pastikan /usr/local/bin (rc, rclone) ikut terbaca
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -29,7 +29,7 @@ fi
 
 # shellcheck disable=SC1090
 . "$CONFIG_FILE"
-export AWS_PROFILE S3_ENDPOINT_URL MYDUMPER_THREADS EXCLUDE_DBS
+export S3_REMOTE RCLONE_EXTRA_ARGS MYDUMPER_THREADS EXCLUDE_DBS
 
 # Upload file tertentu; tanpa argumen file -> upload semua isi result/
 upload() {

@@ -15,11 +15,22 @@ HISTORY_DIR="$HISTORY_PARENT/$CURRENT_DATE"
 mkdir -p "$HISTORY_DIR"
 UPLOAD_LOG_FILE="${UPLOAD_LOG_FILE:-$HISTORY_DIR/upload_log_${CURRENT_TIME}.log}"
 
-# Argumen tambahan untuk aws CLI (misal: --endpoint-url untuk S3-compatible)
-AWS_ARGS=()
-if [ -n "$S3_ENDPOINT_URL" ]; then
-    AWS_ARGS+=(--endpoint-url "$S3_ENDPOINT_URL")
-fi
+# Nama remote rclone (dibuat oleh install.sh / `rclone config`)
+S3_REMOTE="${S3_REMOTE:-s3backup}"
+
+# Opsi rclone: retry otomatis, multipart untuk file besar, tanpa cek/buat bucket
+# (agar cukup dengan permission PutObject). Tambahan via RCLONE_EXTRA_ARGS.
+RCLONE_ARGS=(
+    --retries 3
+    --low-level-retries 10
+    --s3-no-check-bucket
+    --s3-chunk-size 64M
+    --s3-upload-concurrency 4
+    --stats-one-line
+    -v
+)
+# shellcheck disable=SC2206
+[ -n "$RCLONE_EXTRA_ARGS" ] && RCLONE_ARGS+=($RCLONE_EXTRA_ARGS)
 
 # ==============================================================================
 # Fungsi Pendukung
@@ -31,9 +42,14 @@ log_message() {
 }
 
 check_dependencies() {
-    if ! command -v aws &> /dev/null; then
-        log_message "[ERROR] Binary 'aws' (AWS CLI) tidak ditemukan di sistem."
-        log_message "Pastikan AWS CLI sudah terinstal dan terdaftar di PATH sistem."
+    if ! command -v rclone &> /dev/null; then
+        log_message "[ERROR] Binary 'rclone' tidak ditemukan di sistem."
+        log_message "Jalankan install.sh atau install manual: https://rclone.org/install/"
+        exit 1
+    fi
+
+    if ! rclone listremotes 2>/dev/null | grep -qxF "${S3_REMOTE}:"; then
+        log_message "[ERROR] Remote rclone '$S3_REMOTE' belum dikonfigurasi (cek: rclone listremotes)."
         exit 1
     fi
 }
@@ -41,8 +57,8 @@ check_dependencies() {
 validate_bucket() {
     local bucket_name="$1"
 
-    log_message "[INFO] Memeriksa akses ke bucket '$bucket_name' via 'aws s3api head-bucket'..."
-    if ! aws "${AWS_ARGS[@]}" s3api head-bucket --bucket "$bucket_name" >> "$UPLOAD_LOG_FILE" 2>&1; then
+    log_message "[INFO] Memeriksa akses ke bucket '$bucket_name' via rclone..."
+    if ! rclone lsf "$S3_REMOTE:$bucket_name" --max-depth 1 --dirs-only >> "$UPLOAD_LOG_FILE" 2>&1; then
         log_message "[ERROR] Bucket '$bucket_name' tidak dapat diakses (bucket tidak ada atau kredensial salah)."
         exit 1
     fi
@@ -56,7 +72,7 @@ upload_one() {
     local file_name
     file_name=$(basename "$file_path")
 
-    # Target tujuan di S3: s3://bucket[/prefix]/tanggal/filename
+    # Target tujuan: remote:bucket[/prefix]/tanggal/filename
     local remote_target="$base_target/$file_name"
 
     log_message "--------------------------------------------------"
@@ -68,7 +84,7 @@ upload_one() {
     fi
 
     log_message "[INFO] Mengunggah ke S3 -> $remote_target..."
-    if ! aws "${AWS_ARGS[@]}" s3 cp "$file_path" "$remote_target" --only-show-errors >> "$UPLOAD_LOG_FILE" 2>&1; then
+    if ! rclone copyto "$file_path" "$remote_target" "${RCLONE_ARGS[@]}" >> "$UPLOAD_LOG_FILE" 2>&1; then
         log_message "[ERROR] Gagal mengunggah $file_name ke S3. File tetap di tempat semula."
         return 1
     fi
@@ -140,7 +156,7 @@ main() {
         echo "Cara penggunaan: $0 <nama_bucket> [prefix] [file...]"
         echo "Contoh: $0 my-backup-bucket mysql"
         echo "Tanpa [file...], semua file di folder result/ akan di-upload (prefix boleh \"\")."
-        echo "Env opsional: AWS_PROFILE, S3_ENDPOINT_URL (untuk S3-compatible seperti MinIO/R2/Wasabi)"
+        echo "Env opsional: S3_REMOTE (nama remote rclone, default: s3backup), RCLONE_EXTRA_ARGS"
         exit 1
     fi
 
@@ -149,7 +165,7 @@ main() {
     local S3_PREFIX="${2#/}"
     S3_PREFIX="${S3_PREFIX%/}"
 
-    local BASE_TARGET="s3://$S3_BUCKET"
+    local BASE_TARGET="$S3_REMOTE:$S3_BUCKET"
     if [ -n "$S3_PREFIX" ]; then
         BASE_TARGET="$BASE_TARGET/$S3_PREFIX"
     fi
@@ -159,8 +175,7 @@ main() {
     log_message "Waktu Mulai  : $(date)"
     log_message "Target Bucket: $S3_BUCKET"
     log_message "Target Path  : $BASE_TARGET/"
-    [ -n "$AWS_PROFILE" ] && log_message "AWS Profile  : $AWS_PROFILE"
-    [ -n "$S3_ENDPOINT_URL" ] && log_message "Endpoint URL : $S3_ENDPOINT_URL"
+    log_message "Remote rclone: $S3_REMOTE"
 
     local status=0
 

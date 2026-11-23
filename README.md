@@ -13,8 +13,8 @@ Kumpulan skrip otomatisasi berbasis Bash untuk melakukan _backup_ database MySQL
 Installer akan menanyakan secara interaktif lalu:
 
 1. Memilih tujuan upload: **RustFS**, **S3 / S3-compatible**, atau **lokal saja**.
-2. Menginstal dependensi via `apt` (`mydumper`, `default-mysql-client`, `pigz`, `cron`, dll) serta `rc` (RustFS CLI) atau AWS CLI v2 sesuai pilihan.
-3. Mengatur kredensial storage (`rc alias set` / `aws configure --profile`) dan menguji koneksi.
+2. Menginstal dependensi via `apt` (`mydumper`, `default-mysql-client`, `pigz`, `cron`, dll) serta `rc` (RustFS CLI) atau `rclone` (S3) versi terbaru sesuai pilihan.
+3. Mengatur kredensial storage (`rc alias set` / `rclone config create`) dan menguji koneksi.
 4. Mendaftarkan database ke file `dbs` (permission 600): **semua DB di satu server (auto-discover)** atau per database, plus daftar DB yang dikecualikan.
 5. Menentukan jumlah thread `mydumper`.
 6. Memasang **cronjob** di jam tertentu (bisa beberapa jam, mis. `02:00,14:00`) dan hari tertentu (mis. `1-5`). Log cron di `cron.log`.
@@ -62,7 +62,7 @@ Sweep: upload sisa file di result/ (yang gagal + log global), hapus history > 3 
 ├── run-backup.sh          # Runner: backup lalu upload sesuai .config (dipakai cron)
 ├── backupdb.sh            # Skrip utama untuk backup database
 ├── upload-rustfs.sh       # Skrip untuk upload hasil backup ke RustFS
-├── upload-s3.sh           # Skrip untuk upload hasil backup ke S3 / S3-compatible (AWS CLI)
+├── upload-s3.sh           # Skrip untuk upload hasil backup ke S3 / S3-compatible (rclone)
 ├── dbs                    # File konfigurasi daftar database
 ├── .config                # Pengaturan hasil install.sh
 ├── result/                # Folder penyimpanan sementara dan hasil backup lokal
@@ -71,16 +71,21 @@ Sweep: upload sisa file di result/ (yang gagal + log global), hapus history > 3 
 
 ## ☁️ Upload ke S3 (`upload-s3.sh`)
 
-Membutuhkan **AWS CLI (`aws`)** yang sudah dikonfigurasi kredensialnya (`aws configure`).
+Memakai **[rclone](https://rclone.org/)**: satu binary, mendukung AWS S3 dan semua S3-compatible (Cloudflare R2, MinIO, Wasabi, DigitalOcean Spaces, dll), dengan multipart upload dan retry otomatis untuk file backup besar. Remote dibuat oleh `install.sh` (atau manual lewat `rclone config`).
 
 ```bash
-./upload-s3.sh <nama_bucket> [prefix]
+./upload-s3.sh <nama_bucket> [prefix] [file...]
 
-# Contoh: upload ke s3://my-backup-bucket/mysql/YYYYMMDD/
+# Contoh: upload semua isi result/ ke s3backup:my-backup-bucket/mysql/YYYYMMDD/
 ./upload-s3.sh my-backup-bucket mysql
 
-# S3-compatible (MinIO, Cloudflare R2, Wasabi, dll) dengan profile tertentu
-AWS_PROFILE=backup S3_ENDPOINT_URL=https://s3.example.com ./upload-s3.sh my-backup-bucket
+# Memakai remote rclone lain dan opsi tambahan
+S3_REMOTE=r2 RCLONE_EXTRA_ARGS="--bwlimit 20M" ./upload-s3.sh my-backup-bucket
 ```
 
-File di `result/` yang berhasil di-upload dipindahkan ke `history/YYYYMMDD/`, log upload disimpan di folder yang sama, dan history lebih dari 3 hari dihapus otomatis.
+| Env | Keterangan |
+|---|---|
+| `S3_REMOTE` | Nama remote rclone (default `s3backup`) |
+| `RCLONE_EXTRA_ARGS` | Opsi tambahan rclone, mis. `--bwlimit 20M` untuk membatasi bandwidth |
+
+File yang berhasil di-upload dipindahkan ke `history/YYYYMMDD/`, log upload disimpan di folder yang sama, dan history lebih dari 3 hari dihapus otomatis.
