@@ -1,2 +1,6 @@
-# DB_HOST DB_NAME DB_USER DB_PASS
+# DB_HOST DB_NAME DB_USER DB_PASS [BUCKET]
+# DB_NAME '*'     = semua database di host tersebut (auto-discover)
+# BUCKET kosong   = memakai bucket default dari .config
 localhost app user user_pass
+10.0.0.5 * backup backup_pass backup-server-a
+10.0.0.6 crm crm_user crm_pass backup-crm

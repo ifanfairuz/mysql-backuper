@@ -34,14 +34,68 @@ export S3_REMOTE RCLONE_EXTRA_ARGS MYDUMPER_THREADS EXCLUDE_DBS COMPRESS COMPRES
 # Upload file tertentu; tanpa argumen file -> upload semua isi result/
 upload() {
     case "$STORAGE_TYPE" in
-        rustfs) "$SCRIPT_DIR/upload-rustfs.sh" "$RUSTFS_ALIAS" "$RUSTFS_BUCKET" "$@" ;;
-        s3)     "$SCRIPT_DIR/upload-s3.sh" "$S3_BUCKET" "$S3_PREFIX" "$@" ;;
+        rustfs) "$SCRIPT_DIR/upload-rustfs.sh" "$RUSTFS_ALIAS" "${TARGET_BUCKET:-$RUSTFS_BUCKET}" "$@" ;;
+        s3)     "$SCRIPT_DIR/upload-s3.sh" "${TARGET_BUCKET:-$S3_BUCKET}" "$S3_PREFIX" "$@" ;;
         local)  return 0 ;;
         *)      echo "[ERROR] STORAGE_TYPE tidak dikenal: '$STORAGE_TYPE'"; return 1 ;;
     esac
 }
 
+# Upload ulang file yang tertinggal di result/ ke bucket masing-masing
+# (bucket custom dari result/.targets, sisanya ke bucket default), lalu bersihkan history
+sweep() {
+    local result_dir="$SCRIPT_DIR/result" targets="$SCRIPT_DIR/result/.targets"
+    declare -A file_bucket=()
+    local name bucket
+
+    if [ -f "$targets" ]; then
+        while IFS=$'\t' read -r name bucket; do
+            [ -n "$name" ] && [ -n "$bucket" ] && file_bucket["$name"]="$bucket"
+        done < "$targets"
+    fi
+
+    # Kelompokkan file per bucket
+    declare -A groups=()
+    local default_files=() f
+    for f in "$result_dir"/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        bucket="${file_bucket[$name]}"
+        if [ -n "$bucket" ]; then
+            groups["$bucket"]+="$f"$'\n'
+        else
+            default_files+=("$f")
+        fi
+    done
+
+    local files=()
+    for bucket in "${!groups[@]}"; do
+        mapfile -t files < <(printf '%s' "${groups[$bucket]}")
+        echo "[INFO] Sweep: ${#files[@]} file ke bucket '$bucket'"
+        TARGET_BUCKET="$bucket" upload "${files[@]}"
+    done
+    if [ "${#default_files[@]}" -gt 0 ]; then
+        echo "[INFO] Sweep: ${#default_files[@]} file ke bucket default"
+        TARGET_BUCKET="" upload "${default_files[@]}"
+    fi
+
+    # Pangkas .targets: simpan hanya entri yang filenya masih ada
+    if [ -f "$targets" ]; then
+        local tmp="$targets.tmp"
+        : > "$tmp"
+        for name in "${!file_bucket[@]}"; do
+            [ -f "$result_dir/$name" ] && printf '%s\t%s\n' "$name" "${file_bucket[$name]}" >> "$tmp"
+        done
+        mv "$tmp" "$targets"
+        [ -s "$targets" ] || rm -f "$targets"
+    fi
+
+    # Hapus folder history lokal yang lebih lama dari 3 hari
+    find "$SCRIPT_DIR/history" -mindepth 1 -maxdepth 1 -type d -mtime +3 -exec rm -rf {} + 2>/dev/null
+}
+
 # Mode hook: dipanggil oleh backupdb.sh untuk setiap DB yang selesai
+# (TARGET_BUCKET dari environment menentukan bucket tujuan)
 if [ $# -gt 0 ]; then
     upload "$@"
     exit $?
@@ -71,7 +125,7 @@ if [ "$STORAGE_TYPE" = "local" ]; then
     echo "[INFO] Mode lokal: hasil backup tetap di $SCRIPT_DIR/result"
 else
     echo "[INFO] Sweep: upload sisa file di result/ dan bersihkan history lama..."
-    upload 9>&-
+    sweep 9>&-
 fi
 
 echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Selesai run-backup ==="

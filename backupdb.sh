@@ -8,6 +8,8 @@ CONFIG_FILE="$SCRIPT_DIR/dbs"
 RESULT_DIR="$SCRIPT_DIR/result"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+# Mapping file -> bucket custom, dipakai run-backup.sh saat sweep jika upload per DB gagal
+TARGETS_FILE="$RESULT_DIR/.targets"
 GLOBAL_LOG_FILE="$RESULT_DIR/backup_global_${TIMESTAMP}.log"
 
 # Pengaturan opsional via environment:
@@ -18,7 +20,11 @@ GLOBAL_LOG_FILE="$RESULT_DIR/backup_global_${TIMESTAMP}.log"
 #   COMPRESS_LEVEL      level kompresi (default: xz 6, zstd 19, gzip 9)
 #   COMPRESS_THREADS    thread kompresor xz/zstd (default 0 = semua core)
 #   POST_DB_HOOK        perintah yang dipanggil setelah arsip satu DB selesai:
-#                       "$POST_DB_HOOK" <archive> <db.log>   (contoh: upload langsung per DB)
+#                       TARGET_BUCKET=<bucket> "$POST_DB_HOOK" <archive> <db.log>
+#                       (TARGET_BUCKET kosong = bucket default; contoh: upload langsung per DB)
+#
+# Format dbs (per baris): DB_HOST DB_NAME DB_USER DB_PASS [BUCKET]
+#   DB_NAME '*' = semua DB di host tsb; BUCKET kosong = bucket default dari .config
 MYDUMPER_THREADS="${MYDUMPER_THREADS:-4}"
 COMPRESS="${COMPRESS:-xz}"
 COMPRESS_THREADS="${COMPRESS_THREADS:-0}"
@@ -132,13 +138,14 @@ process_database() {
     local db_name="$2"
     local user="$3"
     local pass="$4"
+    local bucket="$5"
 
     local temp_backup_dir="$RESULT_DIR/temp_${db_name}_${TIMESTAMP}"
     local archive_name="$RESULT_DIR/backup_${db_name}_${TIMESTAMP}.${COMP_EXT}"
     local db_log_file="$RESULT_DIR/backup_${db_name}_${TIMESTAMP}.log"
 
     log_global "--------------------------------------------------"
-    log_global "[INFO] Memproses database: '$db_name' di host '$host'"
+    log_global "[INFO] Memproses database: '$db_name' di host '$host' (bucket: ${bucket:-default})"
     log_global "[INFO] Log khusus database ini disimpan di: $(basename "$db_log_file")"
 
     # Inisialisasi file log database
@@ -194,9 +201,17 @@ process_database() {
     echo "Waktu Selesai: $(date)" >> "$db_log_file"
 
     # Pipeline: langsung proses (misal upload) arsip DB ini sebelum lanjut ke DB berikutnya
+    # Catat bucket custom agar sweep meng-upload ke bucket yang benar jika hook gagal
+    if [ -n "$bucket" ]; then
+        local f
+        for f in "$archive_name" "$db_log_file"; do
+            [ -f "$f" ] && printf '%s\t%s\n' "$(basename "$f")" "$bucket" >> "$TARGETS_FILE"
+        done
+    fi
+
     if [ -n "$POST_DB_HOOK" ] && [ -f "$archive_name" ]; then
         log_global "[INFO] Menjalankan hook untuk $(basename "$archive_name")..."
-        if "$POST_DB_HOOK" "$archive_name" "$db_log_file" >> "$GLOBAL_LOG_FILE" 2>&1; then
+        if TARGET_BUCKET="$bucket" "$POST_DB_HOOK" "$archive_name" "$db_log_file" >> "$GLOBAL_LOG_FILE" 2>&1; then
             log_global "[SUCCESS] Hook selesai untuk database: $db_name"
         else
             log_global "[ERROR] Hook gagal untuk database: $db_name. File tetap di folder result."
@@ -218,15 +233,18 @@ main() {
     # 2. Cek file konfigurasi dbs
     if [ ! -f "$CONFIG_FILE" ]; then
         log_global "[ERROR] File konfigurasi '$CONFIG_FILE' tidak ditemukan!"
-        log_global "Buat file dengan format per baris: host dbname user pass"
+        log_global "Buat file dengan format per baris: host dbname user pass [bucket]"
         log_global "Gunakan '*' sebagai dbname untuk mem-backup semua database di host tersebut."
         exit 1
     fi
 
     # 3. Baca file dbs baris per baris
-    while read -r db_host db_name db_user db_pass <&3 || [ -n "$db_host" ]; do
+    local db_host db_name db_user db_pass db_bucket _rest
+    while read -r db_host db_name db_user db_pass db_bucket _rest <&3 || [ -n "$db_host" ]; do
         # Lewati baris kosong atau komentar
         [[ -z "$db_host" || "$db_host" =~ ^# ]] && continue
+        # Kolom ke-5 yang diawali '#' adalah komentar di akhir baris
+        [[ "$db_bucket" == \#* ]] && db_bucket=""
 
         if [ "$db_name" = "*" ]; then
             log_global "[INFO] Auto-discover database di host '$db_host'..."
@@ -235,10 +253,10 @@ main() {
             log_global "[INFO] Ditemukan $(echo "$discovered" | grep -c .) database: $(echo $discovered)"
             local d
             for d in $discovered; do
-                process_database "$db_host" "$d" "$db_user" "$db_pass"
+                process_database "$db_host" "$d" "$db_user" "$db_pass" "$db_bucket"
             done
         else
-            process_database "$db_host" "$db_name" "$db_user" "$db_pass"
+            process_database "$db_host" "$db_name" "$db_user" "$db_pass" "$db_bucket"
         fi
     done 3< "$CONFIG_FILE"
 

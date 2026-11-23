@@ -40,10 +40,19 @@ Sweep: upload sisa file di result/ (yang gagal + log global), hapus history > 3 
 ### Format `dbs`
 
 ```text
-# DB_HOST   DB_NAME  DB_USER  DB_PASS
-10.0.0.5    *        backup   rahasia     # semua DB di server (kecuali system DB & EXCLUDE_DBS)
-10.0.0.6    app      app_user rahasia2    # satu DB tertentu
+# DB_HOST   DB_NAME  DB_USER   DB_PASS    [BUCKET]
+# semua DB di server 10.0.0.5 (kecuali system DB & EXCLUDE_DBS) -> bucket backup-server-a
+10.0.0.5    *        backup    rahasia    backup-server-a
+# satu DB tertentu -> bucket backup-app
+10.0.0.6    app      app_user  rahasia2   backup-app
+# tanpa kolom BUCKET -> bucket default dari .config
+10.0.0.6    crm      app_user  rahasia2
 ```
+
+- Kolom `BUCKET` opsional dan berlaku untuk RustFS maupun S3 (prefix S3 tetap mengikuti `.config`). Pada mode `local`, kolom ini diabaikan.
+- Pada baris `*`, semua DB hasil auto-discover masuk ke bucket baris tersebut.
+- Nilai tidak boleh mengandung spasi. Tulis komentar di baris tersendiri yang diawali `#`.
+- Jika upload ke bucket custom gagal, file tetap di `result/` dan bucket tujuannya dicatat di `result/.targets`. Sweep berikutnya meng-upload file itu ke bucket yang benar, bukan ke bucket default.
 
 ### Pengaturan di `.config`
 
@@ -109,6 +118,8 @@ File yang berhasil di-upload dipindahkan ke `history/YYYYMMDD/`, log upload disi
 Isi arsip adalah output mydumper (file SQL biasa): `<db>-schema-create.sql`, `<db>.<tabel>-schema.sql`, `<db>.<tabel>.00000.sql`, dan `metadata`. Restore paling cepat memakai **myloader** (terpasang bersama paket `mydumper`).
 
 ### 1. Cari file backup
+
+Tentukan dulu bucket-nya: lihat kolom ke-5 baris DB tersebut di `dbs`. Jika kosong, berarti bucket default di `.config` (`S3_BUCKET` / `RUSTFS_BUCKET`).
 
 Backup 3 hari terakhir masih ada di lokal: `history/YYYYMMDD/backup_<db>_<timestamp>.tar.xz`.
 

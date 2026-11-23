@@ -324,18 +324,48 @@ configure_s3() {
         ok "Remote '$S3_REMOTE' ($provider) disimpan di $(rclone config file 2>/dev/null | tail -n1)."
     fi
 
-    info "Menguji akses bucket '$S3_BUCKET'..."
-    if rclone lsf "$S3_REMOTE:$S3_BUCKET" --max-depth 1 --dirs-only &> /dev/null; then
-        ok "Bucket dapat diakses."
-    elif ask_yes_no "Bucket tidak dapat diakses. Coba buat bucket '$S3_BUCKET'?" "n"; then
-        if rclone mkdir "$S3_REMOTE:$S3_BUCKET"; then
-            ok "Bucket dibuat."
+    check_s3_bucket "$S3_BUCKET"
+}
+
+# Cek akses bucket S3 via rclone, tawarkan membuatnya jika belum ada
+check_s3_bucket() {
+    local bucket="$1"
+    info "Menguji akses bucket '$bucket'..."
+    if rclone lsf "$S3_REMOTE:$bucket" --max-depth 1 --dirs-only &> /dev/null; then
+        ok "Bucket '$bucket' dapat diakses."
+    elif ask_yes_no "Bucket '$bucket' tidak dapat diakses. Coba buat bucket?" "n"; then
+        if rclone mkdir "$S3_REMOTE:$bucket"; then
+            ok "Bucket '$bucket' dibuat."
         else
-            warn "Gagal membuat bucket. Periksa kredensial/permission."
+            warn "Gagal membuat bucket '$bucket'. Periksa kredensial/permission."
         fi
     else
-        warn "Lanjut tanpa verifikasi bucket."
+        warn "Lanjut tanpa verifikasi bucket '$bucket'."
     fi
+}
+
+# Bucket default sesuai storage yang dipilih
+default_bucket() {
+    case "$STORAGE_TYPE" in
+        rustfs) echo "$RUSTFS_BUCKET" ;;
+        s3)     echo "$S3_BUCKET" ;;
+    esac
+}
+
+# Tanya bucket tujuan per baris dbs; echo kosong = pakai bucket default
+ask_bucket() {
+    [ "$STORAGE_TYPE" = "local" ] && return
+    local def bucket
+    def=$(default_bucket)
+    while true; do
+        bucket=$(ask "Bucket tujuan (kosongkan = default '$def')" "")
+        no_space "Bucket" "$bucket" && break
+    done
+    [ "$bucket" = "$def" ] && bucket=""
+    if [ -n "$bucket" ] && [ "$STORAGE_TYPE" = "s3" ]; then
+        check_s3_bucket "$bucket" >&2
+    fi
+    echo "$bucket"
 }
 
 # ==============================================================================
@@ -348,7 +378,10 @@ configure_databases() {
     local mode="new"
     if [ -f "$DBS_FILE" ] && grep -qvE '^\s*(#|$)' "$DBS_FILE"; then
         echo "Database yang sudah terdaftar:"
-        grep -vE '^\s*(#|$)' "$DBS_FILE" | awk '{printf "  - %s@%s (user: %s)\n", $2, $1, $3}'
+        grep -vE '^\s*(#|$)' "$DBS_FILE" | awk -v def="$(default_bucket)" '{
+            b = ($5 != "" && $5 !~ /^#/) ? $5 : "(default" (def != "" ? ": " def : "") ")"
+            printf "  - %s@%s (user: %s) -> bucket %s\n", $2, $1, $3, b
+        }'
         echo "  1) Pertahankan  2) Tambah  3) Ganti semua"
         local choice
         while true; do
@@ -370,7 +403,7 @@ configure_databases() {
         [[ "$reg_mode" =~ ^[12]$ ]] && break
     done
 
-    local entries=() host name user pass
+    local entries=() host name user pass bucket
     if [ "$reg_mode" = "1" ]; then
         while true; do
             echo
@@ -389,7 +422,8 @@ configure_databases() {
                 ask_yes_no "Tetap simpan host ini?" "n" || continue
             fi
 
-            entries+=("$host * $user $pass")
+            bucket=$(ask_bucket)
+            entries+=("$host * $user $pass${bucket:+ $bucket}")
             ask_yes_no "Tambah server database lain?" "n" || break
         done
 
@@ -402,14 +436,15 @@ configure_databases() {
         while name=$(ask_required "Nama database" ""); ! no_space "Nama database" "$name"; do :; done
         while user=$(ask_required "User" ""); ! no_space "User" "$user"; do :; done
         while pass=$(ask_secret "Password"); ! no_space "Password" "$pass"; do :; done
-        entries+=("$host $name $user $pass")
-        ok "Ditambahkan: $name@$host"
+        bucket=$(ask_bucket)
+        entries+=("$host $name $user $pass${bucket:+ $bucket}")
+        ok "Ditambahkan: $name@$host -> bucket ${bucket:-default}"
         ask_yes_no "Tambah database lain?" "n" || break
     done
 
     umask 077
     if [ "$mode" = "new" ]; then
-        echo "# DB_HOST DB_NAME DB_USER DB_PASS" > "$DBS_FILE"
+        echo "# DB_HOST DB_NAME DB_USER DB_PASS [BUCKET]" > "$DBS_FILE"
     fi
     printf '%s\n' "${entries[@]}" >> "$DBS_FILE"
     chmod 600 "$DBS_FILE"
