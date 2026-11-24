@@ -77,6 +77,7 @@ Sweep: upload sisa file di result/ (yang gagal + log global), hapus history > 3 
 | `STORAGE_TYPE` | `rustfs`, `s3`, atau `local` |
 | `EXCLUDE_DBS` | DB yang dilewati saat auto-discover (`*`), dipisah spasi |
 | `MYDUMPER_THREADS` | Jumlah thread mydumper per DB (default 4) |
+| `MYDUMPER_EXTRA_ARGS` | Opsi tambahan mydumper (diedit manual), mis. `"--long-query-guard=600"` jika dump gagal karena ada query panjang |
 | `COMPRESS` | `xz` (default) / `zstd` / `gzip` / `none` |
 | `COMPRESS_LEVEL` | Level kompresi (default: xz 6, zstd 19, gzip 9) |
 | `COMPRESS_THREADS` | Thread kompresor xz/zstd (default 0 = semua core; turunkan jika RAM terbatas) |

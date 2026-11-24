@@ -751,6 +751,8 @@ save_config() {
         printf 'CRON_DAYS=%q\n' "${CRON_DAYS:-*}"
         printf 'EXCLUDE_DBS=%q\n' "$EXCLUDE_DBS"
         printf 'MYDUMPER_THREADS=%q\n' "${MYDUMPER_THREADS:-4}"
+        # Opsi tambahan mydumper (diedit manual, dipertahankan saat installer dijalankan ulang)
+        printf 'MYDUMPER_EXTRA_ARGS=%q\n' "$MYDUMPER_EXTRA_ARGS"
         printf 'COMPRESS=%q\n' "${COMPRESS:-xz}"
         printf 'COMPRESS_LEVEL=%q\n' "$COMPRESS_LEVEL"
     } > "$CONFIG_FILE"
