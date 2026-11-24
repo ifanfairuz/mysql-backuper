@@ -16,7 +16,7 @@ Installer akan menanyakan secara interaktif lalu:
 2. Menginstal dependensi via `apt` (`mydumper`, `xz-utils`, `zstd`, `pigz`, `cron`, dll) serta `rc` (RustFS CLI) atau `rclone` (S3) versi terbaru sesuai pilihan. Client `mysql` **tidak** diinstal; jika sudah ada, dipakai untuk uji koneksi dan auto-discover (baris `*` di `dbs`).
 3. Mengatur kredensial storage (`rc alias set` / `rclone config create`) dan menguji koneksi.
 4. Mendaftarkan database ke file `dbs` (permission 600): **semua DB di satu server (auto-discover)** atau per database, plus daftar DB yang dikecualikan.
-5. Menentukan jumlah thread `mydumper` serta algoritma & level kompresi (default **xz**).
+5. Menentukan jumlah thread `mydumper` serta algoritma & level kompresi (default **zstd**).
 6. Memasang **cronjob** di jam tertentu (bisa beberapa jam, mis. `02:00,14:00`) dan hari tertentu (mis. `1-5`). Log cron di `cron.log`.
 7. Menyimpan pengaturan ke `.config`.
 
@@ -43,8 +43,8 @@ Persyaratan untuk user non-root:
 `run-backup.sh` (yang dijalankan cron) memproses database **satu per satu** dan langsung meng-upload hasilnya:
 
 ```text
-DB A: dump -> tar.xz -> upload -> pindah ke history/
-DB B: dump -> tar.xz -> upload -> pindah ke history/
+DB A: dump -> tar.zst -> upload -> pindah ke history/
+DB B: dump -> tar.zst -> upload -> pindah ke history/
 ...
 Sweep: upload sisa file di result/ (yang gagal + log global), hapus history > 3 hari
 ```
@@ -78,7 +78,7 @@ Sweep: upload sisa file di result/ (yang gagal + log global), hapus history > 3 
 | `EXCLUDE_DBS` | DB yang dilewati saat auto-discover (`*`), dipisah spasi |
 | `MYDUMPER_THREADS` | Jumlah thread mydumper per DB (default 4) |
 | `MYDUMPER_EXTRA_ARGS` | Opsi tambahan mydumper (diedit manual), mis. `"--long-query-guard=600"` jika dump gagal karena ada query panjang |
-| `COMPRESS` | `xz` (default) / `zstd` / `gzip` / `none` |
+| `COMPRESS` | `zstd` (default) / `xz` / `gzip` / `none` |
 | `COMPRESS_LEVEL` | Level kompresi (default: xz 6, zstd 19, gzip 9) |
 | `COMPRESS_THREADS` | Thread kompresor xz/zstd (default 0 = semua core; turunkan jika RAM terbatas) |
 
@@ -88,8 +88,8 @@ Setiap DB dibungkus menjadi **satu arsip** (satu stream `tar | kompresor`) agar 
 
 | `COMPRESS` | Arsip | Ukuran | Kecepatan | Butuh apa saat restore |
 |---|---|---|---|---|
-| `xz` (default) | `.tar.xz` | paling kecil | lambat (multi-thread) | `tar` + `xz` (bawaan Debian/Ubuntu) |
-| `zstd` | `.tar.zst` | hampir setara xz | cepat | paket `zstd` |
+| `xz` | `.tar.xz` | paling kecil | lambat (multi-thread) | `tar` + `xz` (bawaan Debian/Ubuntu) |
+| `zstd` (default) | `.tar.zst` | hampir setara xz | cepat | paket `zstd` |
 | `gzip` | `.tar.gz` | paling besar | sedang (pigz) | `tar` + `gzip` (ada di semua sistem) |
 | `none` | `.tar` | mentah | paling cepat | `tar` |
 | `CRON_TIME` / `CRON_DAYS` | Jadwal cronjob (mis. `02:00,14:00` / `*` atau `1-5`) |
@@ -140,7 +140,7 @@ Isi arsip adalah output mydumper (file SQL biasa): `<db>-schema-create.sql`, `<d
 
 Tentukan dulu bucket-nya: lihat kolom ke-5 baris DB tersebut di `dbs`. Jika kosong, berarti bucket default di `.config` (`S3_BUCKET` / `RUSTFS_BUCKET`).
 
-Backup 3 hari terakhir masih ada di lokal: `history/YYYYMMDD/backup_<db>_<timestamp>.tar.xz`.
+Backup 3 hari terakhir masih ada di lokal: `history/YYYYMMDD/backup_<db>_<timestamp>.tar.zst`.
 
 Yang lebih lama bisa diambil dari storage:
 
@@ -159,10 +159,10 @@ rc ls backup/my-backup-bucket/20261123/                        # lihat `rc --hel
 mkdir -p ~/restore && cd ~/restore
 
 # S3 (rclone)
-rclone copy s3backup:my-backup-bucket/20261123/mysql/backup_app_20261123_020000.tar.xz . -P
+rclone copy s3backup:my-backup-bucket/20261123/mysql/backup_app_20261123_020000.tar.zst . -P
 
 # RustFS (rc)
-rc object copy backup/my-backup-bucket/20261123/backup_app_20261123_020000.tar.xz ./
+rc object copy backup/my-backup-bucket/20261123/backup_app_20261123_020000.tar.zst ./
 ```
 
 ### 3. Ekstrak
@@ -170,7 +170,7 @@ rc object copy backup/my-backup-bucket/20261123/backup_app_20261123_020000.tar.x
 GNU `tar` mendeteksi format kompresi secara otomatis:
 
 ```bash
-tar -xf backup_app_20261123_020000.tar.xz        # juga untuk .tar.gz, .tar, dan .tar.zst (jika zstd terpasang)
+tar -xf backup_app_20261123_020000.tar.zst       # butuh paket zstd; juga untuk .tar.xz, .tar.gz, .tar
 ```
 
 Atau secara eksplisit per format:
@@ -241,7 +241,7 @@ Cara ini lebih lambat (tanpa paralel) dan view/trigger/routine (`*-schema-view.s
 ### Restore semua DB dari satu tanggal
 
 ```bash
-for f in backup_*_20261123_*.tar.xz; do tar -xf "$f"; done
+for f in backup_*_20261123_*.tar.*; do tar -xf "$f"; done
 for d in temp_*_20261123_*/; do
   db=$(basename "$d" | sed -E 's/^temp_(.*)_[0-9]{8}_[0-9]{6}$/\1/')
   myloader --host=10.0.0.5 --user=root --password="$PASS" \

@@ -593,17 +593,17 @@ configure_tuning() {
 
     echo
     echo "  Kompresi arsip (satu file per database):"
-    echo "    1) xz   - ukuran paling kecil, restore cukup tar + xz (bawaan Debian/Ubuntu)"
-    echo "    2) zstd - hampir sekecil xz & lebih cepat, restore butuh paket zstd"
+    echo "    1) zstd - hampir sekecil xz, restore jauh lebih cepat, butuh paket zstd (default)"
+    echo "    2) xz   - ukuran paling kecil tapi lambat, restore cukup tar + xz (bawaan Debian/Ubuntu)"
     echo "    3) gzip - paling kompatibel, ukuran paling besar"
     echo "    4) tanpa kompresi"
     local default_choice=1 choice
-    case "$COMPRESS" in zstd) default_choice=2 ;; gzip) default_choice=3 ;; none) default_choice=4 ;; esac
+    case "$COMPRESS" in xz) default_choice=2 ;; gzip) default_choice=3 ;; none) default_choice=4 ;; esac
     while true; do
         choice=$(ask "Pilih kompresi" "$default_choice")
         case "$choice" in
-            1) COMPRESS="xz";   local min=0 max=9  def=6 ;;
-            2) COMPRESS="zstd"; local min=1 max=19 def=19 ;;
+            1) COMPRESS="zstd"; local min=1 max=19 def=19 ;;
+            2) COMPRESS="xz";   local min=0 max=9  def=6 ;;
             3) COMPRESS="gzip"; local min=1 max=9  def=9 ;;
             4) COMPRESS="none" ;;
             *) continue ;;
@@ -753,7 +753,7 @@ save_config() {
         printf 'MYDUMPER_THREADS=%q\n' "${MYDUMPER_THREADS:-4}"
         # Opsi tambahan mydumper (diedit manual, dipertahankan saat installer dijalankan ulang)
         printf 'MYDUMPER_EXTRA_ARGS=%q\n' "$MYDUMPER_EXTRA_ARGS"
-        printf 'COMPRESS=%q\n' "${COMPRESS:-xz}"
+        printf 'COMPRESS=%q\n' "${COMPRESS:-zstd}"
         printf 'COMPRESS_LEVEL=%q\n' "$COMPRESS_LEVEL"
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
@@ -770,7 +770,7 @@ summary() {
         s3)     echo "  Target        : $S3_REMOTE:$S3_BUCKET/<tanggal>/${S3_PREFIX:+$S3_PREFIX/} (rclone)" ;;
     esac
     echo "  Thread dumper : $MYDUMPER_THREADS"
-    echo "  Kompresi      : ${COMPRESS:-xz}${COMPRESS_LEVEL:+ level $COMPRESS_LEVEL}"
+    echo "  Kompresi      : ${COMPRESS:-zstd}${COMPRESS_LEVEL:+ level $COMPRESS_LEVEL}"
     [ -n "$EXCLUDE_DBS" ] && echo "  DB dikecualikan: $EXCLUDE_DBS"
     if [ "$CRON_ENABLED" = "yes" ]; then
         echo "  Cronjob       : jam $CRON_TIME, hari $([ "$CRON_DAYS" = "*" ] && echo "setiap hari" || echo "$CRON_DAYS")"

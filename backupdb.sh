@@ -16,7 +16,7 @@ GLOBAL_LOG_FILE="$RESULT_DIR/backup_global_${TIMESTAMP}.log"
 #   MYDUMPER_THREADS    jumlah thread mydumper (default 4)
 #   MYDUMPER_EXTRA_ARGS argumen tambahan mydumper, dipisah spasi
 #   EXCLUDE_DBS         DB yang dilewati saat auto-discover (baris dbs dengan nama '*'), dipisah spasi
-#   COMPRESS            xz (default, paling kecil) | zstd | gzip | none
+#   COMPRESS            zstd (default) | xz (paling kecil) | gzip | none
 #   COMPRESS_LEVEL      level kompresi (default: xz 6, zstd 19, gzip 9)
 #   COMPRESS_THREADS    thread kompresor xz/zstd (default 0 = semua core)
 #   POST_DB_HOOK        perintah yang dipanggil setelah arsip satu DB selesai:
@@ -26,7 +26,7 @@ GLOBAL_LOG_FILE="$RESULT_DIR/backup_global_${TIMESTAMP}.log"
 # Format dbs (per baris): DB_HOST DB_NAME DB_USER DB_PASS [BUCKET]
 #   DB_NAME '*' = semua DB di host tsb; BUCKET kosong = bucket default dari .config
 MYDUMPER_THREADS="${MYDUMPER_THREADS:-4}"
-COMPRESS="${COMPRESS:-xz}"
+COMPRESS="${COMPRESS:-zstd}"
 COMPRESS_THREADS="${COMPRESS_THREADS:-0}"
 SYSTEM_DBS="information_schema performance_schema mysql sys"
 
@@ -62,7 +62,7 @@ resolve_compression() {
 
     case "$algo" in
         xz|zstd|gzip|none) ;;
-        *) log_global "[WARN] COMPRESS='$algo' tidak dikenal, memakai xz."; algo="xz" ;;
+        *) log_global "[WARN] COMPRESS='$algo' tidak dikenal, memakai zstd."; algo="zstd" ;;
     esac
 
     if [ "$algo" != "none" ] && [ "$algo" != "gzip" ] && ! command -v "$algo" &> /dev/null; then
