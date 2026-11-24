@@ -229,7 +229,7 @@ choose_storage() {
 
 install_apt_packages() {
     title "2. Instalasi Dependensi"
-    local pkgs=(mydumper default-mysql-client xz-utils zstd pigz tar gzip curl ca-certificates cron util-linux)
+    local pkgs=(mydumper xz-utils zstd pigz tar gzip curl ca-certificates cron util-linux)
     [ "$STORAGE_TYPE" = "s3" ] && pkgs+=(unzip)
 
     if [ "$HAS_PRIV" -eq 0 ]; then
@@ -256,7 +256,7 @@ check_packages_unprivileged() {
     # perintah:paket:wajib(1)/opsional(0)
     local spec=(
         "mydumper:mydumper:1" "tar:tar:1" "gzip:gzip:1" "curl:curl:1" "flock:util-linux:1"
-        "mysql:default-mysql-client:0" "xz:xz-utils:0" "zstd:zstd:0" "pigz:pigz:0" "crontab:cron:0"
+        "xz:xz-utils:0" "zstd:zstd:0" "pigz:pigz:0" "crontab:cron:0"
     )
     [ "$STORAGE_TYPE" = "s3" ] && spec+=("unzip:unzip:0")
 
@@ -278,7 +278,6 @@ check_packages_unprivileged() {
         warn "Paket opsional belum terpasang: ${missing_opt[*]}"
         for pkg in "${missing_opt[@]}"; do
             case "$pkg" in
-                default-mysql-client) echo "    - mysql client: mode auto-discover (semua DB di server) tidak bisa dipakai" ;;
                 xz-utils|zstd)        echo "    - $pkg: kompresi terkait otomatis fallback ke gzip" ;;
                 pigz)                 echo "    - pigz: kompresi gzip memakai gzip biasa (single-thread)" ;;
                 cron)                 echo "    - cron: backup otomatis tidak dapat dipasang" ;;
@@ -522,9 +521,12 @@ configure_databases() {
     done
 
     local entries=() host name user pass bucket
-    if [ "$reg_mode" = "1" ] && ! command -v mysql &> /dev/null; then
-        warn "Client 'mysql' tidak terpasang: auto-discover akan gagal saat backup."
-        warn "Minta admin memasang default-mysql-client, atau pilih mode 2 (input per database)."
+    # Client mysql tidak diinstal oleh installer; uji koneksi hanya jika sudah tersedia
+    local has_mysql=0
+    command -v mysql &> /dev/null && has_mysql=1
+    if [ "$reg_mode" = "1" ] && [ "$has_mysql" -eq 0 ]; then
+        warn "Client 'mysql' tidak terpasang: uji koneksi dilewati dan auto-discover akan gagal saat backup."
+        warn "Pasang client mysql/mariadb sendiri bila perlu, atau pilih mode 2 (input per database)."
     fi
     if [ "$reg_mode" = "1" ]; then
         while true; do
@@ -533,9 +535,11 @@ configure_databases() {
             while user=$(ask_required "User (disarankan user khusus backup)" ""); ! no_space "User" "$user"; do :; done
             while pass=$(ask_secret "Password"); ! no_space "Password" "$pass"; do :; done
 
-            info "Menguji koneksi dan mengambil daftar database..."
             local list
-            if list=$(MYSQL_PWD="$pass" mysql -h "$host" -u "$user" -N -B -e "SHOW DATABASES" 2>&1); then
+            if [ "$has_mysql" -eq 0 ]; then
+                info "Uji koneksi dilewati (client mysql tidak tersedia)."
+            elif info "Menguji koneksi dan mengambil daftar database..." \
+                && list=$(MYSQL_PWD="$pass" mysql -h "$host" -u "$user" -N -B -e "SHOW DATABASES" 2>&1); then
                 list=$(echo "$list" | grep -vxE 'information_schema|performance_schema|mysql|sys')
                 ok "Terhubung. Database yang akan di-backup ($(echo "$list" | grep -c .)):"
                 echo "$list" | sed 's/^/    - /'

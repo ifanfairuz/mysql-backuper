@@ -13,7 +13,7 @@ Kumpulan skrip otomatisasi berbasis Bash untuk melakukan _backup_ database MySQL
 Installer akan menanyakan secara interaktif lalu:
 
 1. Memilih tujuan upload: **RustFS**, **S3 / S3-compatible**, atau **lokal saja**.
-2. Menginstal dependensi via `apt` (`mydumper`, `default-mysql-client`, `xz-utils`, `zstd`, `pigz`, `cron`, dll) serta `rc` (RustFS CLI) atau `rclone` (S3) versi terbaru sesuai pilihan.
+2. Menginstal dependensi via `apt` (`mydumper`, `xz-utils`, `zstd`, `pigz`, `cron`, dll) serta `rc` (RustFS CLI) atau `rclone` (S3) versi terbaru sesuai pilihan. Client `mysql` **tidak** diinstal; jika sudah ada, dipakai untuk uji koneksi dan auto-discover (baris `*` di `dbs`).
 3. Mengatur kredensial storage (`rc alias set` / `rclone config create`) dan menguji koneksi.
 4. Mendaftarkan database ke file `dbs` (permission 600): **semua DB di satu server (auto-discover)** atau per database, plus daftar DB yang dikecualikan.
 5. Menentukan jumlah thread `mydumper` serta algoritma & level kompresi (default **xz**).
