@@ -19,11 +19,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/.config"
 LOCK_FILE="$SCRIPT_DIR/.run.lock"
 
-# Cron memakai PATH minimal; pastikan /usr/local/bin (rc, rclone) ikut terbaca
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+# Cron memakai PATH minimal; pastikan rc / rclone ikut terbaca, baik yang dipasang
+# sebagai root (/usr/local/bin) maupun sebagai user biasa (~/.local/bin)
+export PATH="${HOME:+$HOME/.local/bin:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "[ERROR] File $CONFIG_FILE tidak ditemukan. Jalankan install.sh terlebih dahulu."
+    exit 1
+fi
+
+if [ ! -r "$CONFIG_FILE" ]; then
+    echo "[ERROR] File $CONFIG_FILE tidak dapat dibaca oleh user $(id -un) (pemilik: $(stat -c %U "$CONFIG_FILE" 2>/dev/null))."
+    echo "        Jalankan sebagai pemiliknya, atau minta admin: sudo chown $(id -un): \"$CONFIG_FILE\""
     exit 1
 fi
 
@@ -102,7 +109,11 @@ if [ $# -gt 0 ]; then
 fi
 
 # Cegah dua proses backup berjalan bersamaan (misal cron tumpang tindih)
-exec 9> "$LOCK_FILE"
+if ! exec 9> "$LOCK_FILE"; then
+    echo "[ERROR] Tidak dapat membuka lock file $LOCK_FILE sebagai user $(id -un)."
+    echo "        Kemungkinan file/folder milik user lain (misal root). Perbaiki: sudo chown -R $(id -un): \"$SCRIPT_DIR\""
+    exit 1
+fi
 if ! flock -n 9; then
     echo "[WARN] [$(date '+%Y-%m-%d %H:%M:%S')] Backup lain masih berjalan, proses ini dilewati."
     exit 0
@@ -112,7 +123,11 @@ echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Mulai run-backup (storage: $STORAGE_TYP
 
 # Satu file log upload untuk seluruh run ini
 CURRENT_DATE=$(date +%Y%m%d)
-mkdir -p "$SCRIPT_DIR/history/$CURRENT_DATE"
+if ! mkdir -p "$SCRIPT_DIR/history/$CURRENT_DATE" || [ ! -w "$SCRIPT_DIR/history/$CURRENT_DATE" ]; then
+    echo "[ERROR] Folder $SCRIPT_DIR/history/$CURRENT_DATE tidak dapat ditulis oleh user $(id -un)."
+    echo "        Perbaiki: sudo chown -R $(id -un): \"$SCRIPT_DIR/history\""
+    exit 1
+fi
 export UPLOAD_LOG_FILE="$SCRIPT_DIR/history/$CURRENT_DATE/upload_log_$(date +%H%M%S).log"
 
 if [ "$STORAGE_TYPE" != "local" ]; then

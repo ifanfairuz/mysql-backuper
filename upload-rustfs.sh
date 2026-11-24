@@ -11,8 +11,15 @@ CURRENT_DATE=$(date +%Y%m%d)
 CURRENT_TIME=$(date +%H%M%S)
 HISTORY_DIR="$HISTORY_PARENT/$CURRENT_DATE"
 
+# rc bisa terpasang di /usr/local/bin (root) atau ~/.local/bin (user biasa)
+export PATH="${HOME:+$HOME/.local/bin:}/usr/local/bin:$PATH"
+
 # Pastikan folder history harian ada terlebih dahulu untuk menampung log
-mkdir -p "$HISTORY_DIR"
+if ! mkdir -p "$HISTORY_DIR" || [ ! -w "$HISTORY_DIR" ]; then
+    echo "[ERROR] Folder $HISTORY_DIR tidak dapat ditulis oleh user $(id -un)." >&2
+    echo "        Perbaiki: sudo chown -R $(id -un): \"$HISTORY_PARENT\"" >&2
+    exit 1
+fi
 UPLOAD_LOG_FILE="${UPLOAD_LOG_FILE:-$HISTORY_DIR/upload_log_${CURRENT_TIME}.log}"
 
 # ==============================================================================
@@ -27,7 +34,7 @@ log_message() {
 check_dependencies() {
     if ! command -v rc &> /dev/null; then
         log_message "[ERROR] Binary 'rc' (RustFS client) tidak ditemukan di sistem."
-        log_message "Pastikan 'rc' sudah terinstal dan terdaftar di PATH sistem (misal: /usr/local/bin/rc)."
+        log_message "Pastikan 'rc' sudah terinstal di PATH (misal: /usr/local/bin/rc atau ~/.local/bin/rc)."
         exit 1
     fi
 }

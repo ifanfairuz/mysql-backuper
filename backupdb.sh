@@ -30,8 +30,12 @@ COMPRESS="${COMPRESS:-xz}"
 COMPRESS_THREADS="${COMPRESS_THREADS:-0}"
 SYSTEM_DBS="information_schema performance_schema mysql sys"
 
-# Buat direktori result jika belum ada
-mkdir -p "$RESULT_DIR"
+# Buat direktori result jika belum ada & pastikan dapat ditulis user saat ini
+if ! mkdir -p "$RESULT_DIR" || [ ! -w "$RESULT_DIR" ] || [ ! -x "$RESULT_DIR" ]; then
+    echo "[ERROR] Folder $RESULT_DIR tidak dapat ditulis oleh user $(id -un)." >&2
+    echo "        Kemungkinan milik user lain (misal root). Perbaiki: sudo chown -R $(id -un): \"$RESULT_DIR\"" >&2
+    exit 1
+fi
 
 # ==============================================================================
 # Fungsi Pendukung

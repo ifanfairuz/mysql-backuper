@@ -22,6 +22,22 @@ Installer akan menanyakan secara interaktif lalu:
 
 Jalankan ulang `./install.sh` kapan saja untuk mengubah pengaturan; nilai lama dipakai sebagai default. Backup manual: `./run-backup.sh`.
 
+### 👤 Menjalankan sebagai user non-root
+
+Disarankan menjalankan installer **sebagai user yang nantinya menjalankan backup** (bukan `sudo ./install.sh`). Kredensial rc/rclone (`~/.config/...`) dan cronjob dibuat per user.
+
+| Kondisi | Perilaku installer |
+|---|---|
+| User dengan akses `sudo` | Paket diinstal via `sudo apt-get`, `rc`/`rclone` ke `/usr/local/bin`. Pengaturan, kredensial & cron tetap milik user ini |
+| User biasa **tanpa** sudo | Paket hanya diperiksa. Jika paket wajib (`mydumper`, `curl`, `tar`, `gzip`, `util-linux`, `ca-certificates`) belum ada, installer menampilkan perintah `apt-get` untuk admin. `rc`/`rclone` dipasang ke `~/.local/bin` (tanpa `unzip`, rclone diekstrak dengan `python3`) |
+| Dijalankan sebagai root | Semua dibuat untuk user root (installer memberi peringatan bila dipanggil lewat `sudo`) |
+
+Persyaratan untuk user non-root:
+
+- Folder proyek harus dapat ditulis user tersebut (clone ke home, mis. `~/mysql-backuper`).
+- User diizinkan memakai cron (cek `/etc/cron.allow` / `/etc/cron.deny`). Jika gagal, installer menampilkan baris cron untuk dipasang manual via `crontab -e`.
+- Pindah dari instalasi root ke user biasa: installer mendeteksi file milik root (`.config`, `dbs`, `result/`, `history/`, `.run.lock`) dan menawarkan `chown` via sudo, serta menawarkan penghapusan cronjob lama di crontab root agar backup tidak berjalan dobel.
+
 ## 🔁 Alur Backup (pipeline per database)
 
 `run-backup.sh` (yang dijalankan cron) memproses database **satu per satu** dan langsung meng-upload hasilnya:

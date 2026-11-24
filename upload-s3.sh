@@ -11,8 +11,15 @@ CURRENT_DATE=$(date +%Y%m%d)
 CURRENT_TIME=$(date +%H%M%S)
 HISTORY_DIR="$HISTORY_PARENT/$CURRENT_DATE"
 
+# rclone bisa terpasang di /usr/local/bin (root) atau ~/.local/bin (user biasa)
+export PATH="${HOME:+$HOME/.local/bin:}/usr/local/bin:$PATH"
+
 # Pastikan folder history harian ada terlebih dahulu untuk menampung log
-mkdir -p "$HISTORY_DIR"
+if ! mkdir -p "$HISTORY_DIR" || [ ! -w "$HISTORY_DIR" ]; then
+    echo "[ERROR] Folder $HISTORY_DIR tidak dapat ditulis oleh user $(id -un)." >&2
+    echo "        Perbaiki: sudo chown -R $(id -un): \"$HISTORY_PARENT\"" >&2
+    exit 1
+fi
 UPLOAD_LOG_FILE="${UPLOAD_LOG_FILE:-$HISTORY_DIR/upload_log_${CURRENT_TIME}.log}"
 
 # Nama remote rclone (dibuat oleh install.sh / `rclone config`)

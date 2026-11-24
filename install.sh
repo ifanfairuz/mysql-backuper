@@ -8,7 +8,10 @@
 # - Menyimpan pengaturan ke .config dan daftar database ke dbs
 #
 # Jalankan sebagai user yang nantinya menjalankan backup (bukan wajib root);
-# sudo hanya dipakai untuk instalasi paket.
+# sudo hanya dipakai untuk instalasi paket. Tanpa root/sudo:
+#   - paket sistem harus sudah dipasang admin (installer hanya memeriksa)
+#   - rc / rclone dipasang ke ~/.local/bin
+#   - cronjob dipasang di crontab user ini
 # ==============================================================================
 
 set -o pipefail
@@ -19,6 +22,10 @@ DBS_FILE="$SCRIPT_DIR/dbs"
 RUNNER="$SCRIPT_DIR/run-backup.sh"
 CRON_MARKER="# mysql-backuper"
 RC_FALLBACK_VERSION="v0.1.30"
+USER_BIN_DIR="$HOME/.local/bin"
+
+# Binary yang dipasang tanpa root ada di ~/.local/bin
+export PATH="$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 # ==============================================================================
 # Helper tampilan & input
@@ -101,16 +108,73 @@ check_os() {
     ok "OS terdeteksi: ${PRETTY_NAME:-$ID}"
 }
 
+# HAS_PRIV=1 jika bisa menginstal paket sistem (root / sudo), 0 jika user biasa tanpa sudo.
+# BIN_DIR = lokasi pemasangan rc / rclone.
 setup_sudo() {
+    HAS_PRIV=1
     if [ "$EUID" -eq 0 ]; then
         SUDO=""
         warn "Berjalan sebagai root: konfigurasi rc/rclone dan cron akan dibuat untuk user root."
-    elif command -v sudo &> /dev/null; then
+        if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+            warn "Jika backup akan dijalankan oleh '$SUDO_USER', jalankan installer tanpa sudo: ./install.sh"
+            ask_yes_no "Tetap lanjut sebagai root?" "n" || exit 0
+        fi
+    elif command -v sudo &> /dev/null && { info "Mencoba akses sudo untuk instalasi paket..."; sudo -v; }; then
         SUDO="sudo"
-        info "Perintah instalasi paket akan memakai sudo."
-        sudo -v || die "Gagal mendapatkan akses sudo."
+        ok "Perintah instalasi paket akan memakai sudo."
     else
-        die "sudo tidak tersedia. Jalankan sebagai root atau install sudo terlebih dahulu."
+        SUDO=""
+        HAS_PRIV=0
+        warn "Tanpa akses root/sudo: paket sistem hanya diperiksa (tidak diinstal), rc/rclone dipasang ke $USER_BIN_DIR."
+    fi
+
+    if [ "$HAS_PRIV" -eq 1 ]; then
+        BIN_DIR="/usr/local/bin"
+    else
+        BIN_DIR="$USER_BIN_DIR"
+    fi
+}
+
+# File milik user lain (misal sisa instalasi/backup sebagai root) membuat backup gagal
+check_permissions() {
+    local me
+    me=$(id -un)
+    if [ ! -w "$SCRIPT_DIR" ] || [ ! -x "$SCRIPT_DIR" ]; then
+        die "Folder $SCRIPT_DIR tidak dapat ditulis oleh user '$me'.
+  Pindahkan proyek ke folder milik user ini (mis. ~/mysql-backuper) atau: sudo chown -R $me: \"$SCRIPT_DIR\""
+    fi
+    [ "$EUID" -eq 0 ] && return
+
+    local paths=() p foreign
+    for p in "$CONFIG_FILE" "$DBS_FILE" "$SCRIPT_DIR/result" "$SCRIPT_DIR/history" \
+             "$SCRIPT_DIR/cron.log" "$SCRIPT_DIR/.run.lock"; do
+        [ -e "$p" ] && paths+=("$p")
+    done
+    [ "${#paths[@]}" -eq 0 ] && return
+
+    foreign=$(find "${paths[@]}" ! -user "$(id -u)" ! -name .gitignore 2>/dev/null | head -n 10)
+    [ -z "$foreign" ] && return
+
+    warn "File berikut bukan milik user '$me' (kemungkinan dari instalasi/backup sebagai root):"
+    echo "$foreign" | sed 's/^/    /'
+    if [ -n "$SUDO" ] && ask_yes_no "Ubah kepemilikan semua file tersebut ke '$me' (pakai sudo)?" "y"; then
+        $SUDO chown -R "$(id -u):$(id -g)" "${paths[@]}" || die "Gagal mengubah kepemilikan file."
+        ok "Kepemilikan file diperbarui ke '$me'."
+    else
+        die "Perbaiki kepemilikan file terlebih dahulu, contoh (oleh admin):
+  sudo chown -R $me: ${paths[*]}"
+    fi
+}
+
+# Pasang binary ke BIN_DIR (sudo jika /usr/local/bin, langsung jika ~/.local/bin)
+install_bin() {
+    local src="$1" name="$2"
+    $SUDO mkdir -p "$BIN_DIR" && $SUDO install -m 0755 "$src" "$BIN_DIR/$name" || return 1
+    hash -r
+    local resolved
+    resolved=$(command -v "$name")
+    if [ "$resolved" != "$BIN_DIR/$name" ]; then
+        warn "'$name' yang terbaca di PATH adalah '$resolved', bukan '$BIN_DIR/$name'."
     fi
 }
 
@@ -168,6 +232,11 @@ install_apt_packages() {
     local pkgs=(mydumper default-mysql-client xz-utils zstd pigz tar gzip curl ca-certificates cron util-linux)
     [ "$STORAGE_TYPE" = "s3" ] && pkgs+=(unzip)
 
+    if [ "$HAS_PRIV" -eq 0 ]; then
+        check_packages_unprivileged
+        return
+    fi
+
     info "Menjalankan apt-get update..."
     $SUDO apt-get update -y || die "apt-get update gagal."
 
@@ -180,6 +249,49 @@ install_apt_packages() {
         $SUDO systemctl enable --now cron &> /dev/null || warn "Tidak dapat mengaktifkan layanan cron via systemctl."
     fi
     ok "Paket dasar terinstal (mydumper $(mydumper --version 2>/dev/null | head -n1 | awk '{print $2}'))."
+}
+
+# Tanpa root/sudo: hanya periksa paket, minta admin memasang yang kurang
+check_packages_unprivileged() {
+    # perintah:paket:wajib(1)/opsional(0)
+    local spec=(
+        "mydumper:mydumper:1" "tar:tar:1" "gzip:gzip:1" "curl:curl:1" "flock:util-linux:1"
+        "mysql:default-mysql-client:0" "xz:xz-utils:0" "zstd:zstd:0" "pigz:pigz:0" "crontab:cron:0"
+    )
+    [ "$STORAGE_TYPE" = "s3" ] && spec+=("unzip:unzip:0")
+
+    local item cmd pkg req missing_req=() missing_opt=()
+    for item in "${spec[@]}"; do
+        IFS=: read -r cmd pkg req <<< "$item"
+        command -v "$cmd" &> /dev/null && continue
+        if [ "$req" = "1" ]; then missing_req+=("$pkg"); else missing_opt+=("$pkg"); fi
+    done
+    [ -s /etc/ssl/certs/ca-certificates.crt ] || missing_req+=(ca-certificates)
+
+    if [ "${#missing_req[@]}" -gt 0 ]; then
+        die "Paket wajib belum terpasang: ${missing_req[*]}
+  Tanpa root/sudo installer tidak dapat memasangnya. Minta admin menjalankan:
+    sudo apt-get install -y ${missing_req[*]} ${missing_opt[*]}"
+    fi
+
+    if [ "${#missing_opt[@]}" -gt 0 ]; then
+        warn "Paket opsional belum terpasang: ${missing_opt[*]}"
+        for pkg in "${missing_opt[@]}"; do
+            case "$pkg" in
+                default-mysql-client) echo "    - mysql client: mode auto-discover (semua DB di server) tidak bisa dipakai" ;;
+                xz-utils|zstd)        echo "    - $pkg: kompresi terkait otomatis fallback ke gzip" ;;
+                pigz)                 echo "    - pigz: kompresi gzip memakai gzip biasa (single-thread)" ;;
+                cron)                 echo "    - cron: backup otomatis tidak dapat dipasang" ;;
+                unzip)                echo "    - unzip: ekstrak rclone memakai python3 sebagai gantinya" ;;
+            esac
+        done
+        echo "  Admin dapat memasangnya dengan: sudo apt-get install -y ${missing_opt[*]}"
+    fi
+
+    if command -v crontab &> /dev/null && command -v pgrep &> /dev/null && ! pgrep -x cron &> /dev/null; then
+        warn "Layanan cron sepertinya tidak berjalan. Minta admin: sudo systemctl enable --now cron"
+    fi
+    ok "Semua paket wajib tersedia (mydumper $(mydumper --version 2>/dev/null | head -n1 | awk '{print $2}'))."
 }
 
 install_rc() {
@@ -208,9 +320,9 @@ install_rc() {
     bin=$(find "$tmp" -type f -name rc | head -n1)
     [ -n "$bin" ] || { rm -rf "$tmp"; die "Binary rc tidak ditemukan di dalam arsip."; }
 
-    $SUDO install -m 0755 "$bin" /usr/local/bin/rc || { rm -rf "$tmp"; die "Gagal memasang rc ke /usr/local/bin."; }
+    install_bin "$bin" rc || { rm -rf "$tmp"; die "Gagal memasang rc ke $BIN_DIR."; }
     rm -rf "$tmp"
-    ok "rc terinstal: $(/usr/local/bin/rc --version 2>/dev/null | head -n1)"
+    ok "rc terinstal di $BIN_DIR: $("$BIN_DIR/rc" --version 2>/dev/null | head -n1)"
 }
 
 install_rclone() {
@@ -224,15 +336,21 @@ install_rclone() {
     info "Mengunduh rclone versi terbaru ($ARCH)..."
     curl -fL --progress-bar -o "$tmp/rclone.zip" "https://downloads.rclone.org/rclone-current-linux-${ARCH}.zip" \
         || { rm -rf "$tmp"; die "Gagal mengunduh rclone."; }
-    unzip -q "$tmp/rclone.zip" -d "$tmp" || { rm -rf "$tmp"; die "Gagal mengekstrak rclone."; }
+    if command -v unzip &> /dev/null; then
+        unzip -q "$tmp/rclone.zip" -d "$tmp" || { rm -rf "$tmp"; die "Gagal mengekstrak rclone."; }
+    elif command -v python3 &> /dev/null; then
+        python3 -m zipfile -e "$tmp/rclone.zip" "$tmp" || { rm -rf "$tmp"; die "Gagal mengekstrak rclone."; }
+    else
+        rm -rf "$tmp"
+        die "Butuh 'unzip' atau 'python3' untuk mengekstrak rclone. Minta admin: sudo apt-get install -y unzip"
+    fi
 
     local bin
     bin=$(find "$tmp" -type f -name rclone | head -n1)
     [ -n "$bin" ] || { rm -rf "$tmp"; die "Binary rclone tidak ditemukan di dalam arsip."; }
-    $SUDO install -m 0755 "$bin" /usr/local/bin/rclone || { rm -rf "$tmp"; die "Gagal memasang rclone ke /usr/local/bin."; }
+    install_bin "$bin" rclone || { rm -rf "$tmp"; die "Gagal memasang rclone ke $BIN_DIR."; }
     rm -rf "$tmp"
-    hash -r
-    ok "rclone terinstal: $(/usr/local/bin/rclone version 2>/dev/null | head -n1)"
+    ok "rclone terinstal di $BIN_DIR: $("$BIN_DIR/rclone" version 2>/dev/null | head -n1)"
 }
 
 # ==============================================================================
@@ -404,6 +522,10 @@ configure_databases() {
     done
 
     local entries=() host name user pass bucket
+    if [ "$reg_mode" = "1" ] && ! command -v mysql &> /dev/null; then
+        warn "Client 'mysql' tidak terpasang: auto-discover akan gagal saat backup."
+        warn "Minta admin memasang default-mysql-client, atau pilih mode 2 (input per database)."
+    fi
     if [ "$reg_mode" = "1" ]; then
         while true; do
             echo
@@ -513,6 +635,15 @@ configure_cron() {
     local default_enable="y"
     [ "$CRON_ENABLED" = "no" ] && default_enable="n"
 
+    if ! command -v crontab &> /dev/null; then
+        CRON_ENABLED="no"
+        warn "Perintah 'crontab' tidak tersedia (paket cron belum terpasang), cronjob dilewati."
+        echo "  Setelah admin memasang cron, jalankan ulang installer ini." >&2
+        return
+    fi
+
+    remove_root_cron
+
     if ! ask_yes_no "Pasang cronjob untuk menjalankan backup otomatis?" "$default_enable"; then
         CRON_ENABLED="no"
         ( crontab -l 2>/dev/null | grep -vF "$CRON_MARKER" ) | crontab - 2>/dev/null
@@ -565,10 +696,35 @@ configure_cron() {
         lines+=("$minute $hour * * $days \"$RUNNER\" >> \"$SCRIPT_DIR/cron.log\" 2>&1 $CRON_MARKER")
     done
 
-    ( crontab -l 2>/dev/null | grep -vF "$CRON_MARKER"; printf '%s\n' "${lines[@]}" ) | crontab - \
-        || die "Gagal memasang crontab."
+    if ! ( crontab -l 2>/dev/null | grep -vF "$CRON_MARKER"; printf '%s\n' "${lines[@]}" ) | crontab -; then
+        # Jangan hentikan installer: pengaturan lain tetap perlu disimpan
+        CRON_ENABLED="no"
+        warn "Gagal memasang crontab untuk user $(id -un)."
+        warn "Kemungkinan user ini tidak diizinkan memakai cron (cek /etc/cron.allow dan /etc/cron.deny)."
+        echo "  Minta admin mengizinkan user ini, atau pasang manual baris berikut via 'crontab -e':" >&2
+        printf '    %s\n' "${lines[@]}" >&2
+        return
+    fi
     ok "Cronjob terpasang untuk user $(id -un):"
     crontab -l | grep -F "$CRON_MARKER" | sed 's/^/    /'
+}
+
+# Instalasi lama sebagai root meninggalkan cronjob di crontab root -> backup jalan dobel
+# dan membuat file milik root. Tawarkan penghapusan jika ada akses sudo.
+remove_root_cron() {
+    [ "$EUID" -ne 0 ] && [ -n "$SUDO" ] || return
+    local current
+    current=$($SUDO crontab -l -u root 2>/dev/null) || return
+    printf '%s\n' "$current" | grep -F "$CRON_MARKER" | grep -qF "\"$RUNNER\"" || return
+
+    warn "Cronjob mysql-backuper untuk folder ini ditemukan di crontab root."
+    if ask_yes_no "Hapus dari crontab root agar backup tidak berjalan dobel sebagai root?" "y"; then
+        printf '%s\n' "$current" \
+            | awk -v m="$CRON_MARKER" -v r="\"$RUNNER\"" '!(index($0, m) && index($0, r))' \
+            | $SUDO crontab -u root - \
+            && ok "Cronjob lama di crontab root dihapus." \
+            || warn "Gagal menghapus cronjob di crontab root."
+    fi
 }
 
 # ==============================================================================
@@ -643,6 +799,7 @@ main() {
 
     check_os
     setup_sudo
+    check_permissions
     detect_arch
     load_existing_config
 
