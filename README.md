@@ -116,7 +116,7 @@ Memakai **[rclone](https://rclone.org/)**: satu binary, mendukung AWS S3 dan sem
 ```bash
 ./upload-s3.sh <nama_bucket> [prefix] [file...]
 
-# Contoh: upload semua isi result/ ke s3backup:my-backup-bucket/mysql/YYYYMMDD/
+# Contoh: upload semua isi result/ ke s3backup:my-backup-bucket/YYYYMMDD/mysql/
 ./upload-s3.sh my-backup-bucket mysql
 
 # Memakai remote rclone lain dan opsi tambahan
@@ -127,6 +127,8 @@ S3_REMOTE=r2 RCLONE_EXTRA_ARGS="--bwlimit 20M" ./upload-s3.sh my-backup-bucket
 |---|---|
 | `S3_REMOTE` | Nama remote rclone (default `s3backup`) |
 | `RCLONE_EXTRA_ARGS` | Opsi tambahan rclone, mis. `--bwlimit 20M` untuk membatasi bandwidth |
+
+Struktur di bucket: `<bucket>/<YYYYMMDD>/<prefix>/<file>` (tanpa prefix: `<bucket>/<YYYYMMDD>/<file>`).
 
 File yang berhasil di-upload dipindahkan ke `history/YYYYMMDD/`, log upload disimpan di folder yang sama, dan history lebih dari 3 hari dihapus otomatis.
 
@@ -144,8 +146,8 @@ Yang lebih lama bisa diambil dari storage:
 
 ```bash
 # S3 (rclone)
-rclone lsf s3backup:my-backup-bucket/mysql/                    # daftar tanggal
-rclone lsf s3backup:my-backup-bucket/mysql/20261123/           # daftar file pada tanggal tsb
+rclone lsf s3backup:my-backup-bucket/                          # daftar tanggal
+rclone lsf s3backup:my-backup-bucket/20261123/mysql/           # daftar file pada tanggal tsb
 
 # RustFS (rc)
 rc ls backup/my-backup-bucket/20261123/                        # lihat `rc --help` untuk perintah list
@@ -157,7 +159,7 @@ rc ls backup/my-backup-bucket/20261123/                        # lihat `rc --hel
 mkdir -p ~/restore && cd ~/restore
 
 # S3 (rclone)
-rclone copy s3backup:my-backup-bucket/mysql/20261123/backup_app_20261123_020000.tar.xz . -P
+rclone copy s3backup:my-backup-bucket/20261123/mysql/backup_app_20261123_020000.tar.xz . -P
 
 # RustFS (rc)
 rc object copy backup/my-backup-bucket/20261123/backup_app_20261123_020000.tar.xz ./

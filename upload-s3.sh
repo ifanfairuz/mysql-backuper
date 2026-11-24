@@ -79,7 +79,7 @@ upload_one() {
     local file_name
     file_name=$(basename "$file_path")
 
-    # Target tujuan: remote:bucket[/prefix]/tanggal/filename
+    # Target tujuan: remote:bucket/tanggal[/prefix]/filename
     local remote_target="$base_target/$file_name"
 
     log_message "--------------------------------------------------"
@@ -172,11 +172,11 @@ main() {
     local S3_PREFIX="${2#/}"
     S3_PREFIX="${S3_PREFIX%/}"
 
-    local BASE_TARGET="$S3_REMOTE:$S3_BUCKET"
+    # Struktur: remote:bucket/tanggal[/prefix]
+    local BASE_TARGET="$S3_REMOTE:$S3_BUCKET/$CURRENT_DATE"
     if [ -n "$S3_PREFIX" ]; then
         BASE_TARGET="$BASE_TARGET/$S3_PREFIX"
     fi
-    BASE_TARGET="$BASE_TARGET/$CURRENT_DATE"
 
     log_message "=== Memulai Proses Upload ke S3 & Arsip History ==="
     log_message "Waktu Mulai  : $(date)"

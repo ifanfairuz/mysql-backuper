@@ -389,7 +389,7 @@ configure_s3() {
     title "3. Konfigurasi S3 (rclone)"
     S3_REMOTE=$(ask_required "Nama remote rclone" "${S3_REMOTE:-s3backup}")
     S3_BUCKET=$(ask_required "Nama bucket" "$S3_BUCKET")
-    S3_PREFIX=$(ask "Prefix folder di bucket (kosongkan jika tidak ada)" "$S3_PREFIX")
+    S3_PREFIX=$(ask "Prefix folder di dalam folder tanggal, hasil: <bucket>/<tanggal>/<prefix>/ (kosongkan jika tidak ada)" "$S3_PREFIX")
 
     local configure=0
     if rclone listremotes 2>/dev/null | grep -qxF "${S3_REMOTE}:"; then
@@ -767,7 +767,7 @@ summary() {
     echo "  Tujuan upload : $STORAGE_TYPE"
     case "$STORAGE_TYPE" in
         rustfs) echo "  Target        : $RUSTFS_ALIAS/$RUSTFS_BUCKET/<tanggal>/" ;;
-        s3)     echo "  Target        : $S3_REMOTE:$S3_BUCKET${S3_PREFIX:+/$S3_PREFIX}/<tanggal>/ (rclone)" ;;
+        s3)     echo "  Target        : $S3_REMOTE:$S3_BUCKET/<tanggal>/${S3_PREFIX:+$S3_PREFIX/} (rclone)" ;;
     esac
     echo "  Thread dumper : $MYDUMPER_THREADS"
     echo "  Kompresi      : ${COMPRESS:-xz}${COMPRESS_LEVEL:+ level $COMPRESS_LEVEL}"
